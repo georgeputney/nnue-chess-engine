@@ -55,6 +55,33 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
     )
 
 
+# move-ordering score: MVV-LVA for captures (most valuable victim - least valuable aggressor) 
+# plus any promotion gain. quiets score 0 and sort after captures. not the search's idea of value,
+# just an ordering hint.
+# ref: https://www.chessprogramming.org/MVV-LVA
+def capture_score(board: chess.Board, move: chess.Move) -> int:
+    score = 0
+
+    if board.is_en_passant(move):
+        score = PIECE_VALUE[chess.PAWN]
+    else:
+        victim = board.piece_at(move.to_square)
+
+        if victim is not None:
+            score = PIECE_VALUE[victim.piece_type]
+
+    # a capture: victim * 16 keeps it above every quiet (which score 0); the attacker term
+    # only tie-breaks captures of the same victim (cheaper attacker first). king attacker -> 0.
+    if score:
+        attacker = board.piece_at(move.from_square)
+        score = score * 16 - (PIECE_VALUE.get(attacker.piece_type, 0) if attacker else 0)
+
+    if move.promotion:
+        score += PIECE_VALUE[move.promotion] - PIECE_VALUE[chess.PAWN]
+
+    return score
+
+
 # value of `board` searched `depth` plies, from the side to move. the caller negates the
 # result and swaps/negates the window (`-beta, -alpha`), since good for the mover is bad
 # for the previous mover. no legal moves = mate (in check) or stalemate. mates are not
@@ -69,6 +96,8 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
         raise Timeout
 
     moves = list(board.legal_moves)
+    moves.sort(key=lambda m: capture_score(board, m), reverse=True)
+
     if not moves:
         return -MATE if board.is_check() else 0
     if depth == 0:
@@ -96,7 +125,10 @@ def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
     best_move = next(iter(board.legal_moves))
     best_score = -MATE
 
-    for move in board.legal_moves:
+    moves = list(board.legal_moves)
+    moves.sort(key=lambda m: capture_score(board, m), reverse=True)
+
+    for move in moves:
 
         board.push(move)
         score = -negamax(board, depth - 1, -MATE, MATE)
