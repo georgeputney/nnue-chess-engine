@@ -1,4 +1,4 @@
-# neural-chess-engine
+# alpha-beta chess engine
 
 My entry for [AI Chessathon](https://aichessathon.com). The whole submission is `agent.py`. It
 exposes one function and plays one side of a game under a 120 s + 0.5 s per move clock, on a
@@ -23,18 +23,19 @@ The plan, in the order it earns its strength:
 2. Move ordering: captures first, ordered by MVV-LVA, plus a transposition table kept across
    moves.
 3. Quiescence search at the leaves so the evaluation is never read mid-exchange.
-4. Evaluation: material and piece-square tables first, as a reference, then a small ONNX net
-   evaluated in batches over a search pass.
+4. Evaluation: material and piece-square tables, tapered between a midgame and an endgame set,
+   plus mobility and pawn-structure terms. Every weight Texel-tuned against engine-labelled
+   positions offline; only the resulting numbers ship.
 5. Time management driven by the clock that gets handed in, not a constant, with a margin so a
    flag is never the reason a game is lost.
 
-`docs/IDEAS.md` has the longer reasoning behind each of these.
+`docs/plan.md` has the full phase list and the measurement behind each change.
 
 ## Layout
 
 ```
 agent.py       the submission
-docs/IDEAS.md  design notes: where the strength comes from
+docs/plan.md   the build plan and how each change is measured
 baselines/     random, greedy, minimax, numba, each a directory with an agent.py, to measure against
 harness/       local runner, referee, and packaging that mirror the platform's protocol and clock
 ```
