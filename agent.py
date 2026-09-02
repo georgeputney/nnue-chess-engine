@@ -9,6 +9,7 @@ An alpha-beta search over a material evaluation, built up in the phases in docs/
 import time
 
 import chess
+import chess.polyglot
 
 # centipawn value per piece type. no king entry: both sides always have one, so it never
 # affects the difference.
@@ -40,6 +41,13 @@ CHECK_EVERY = 2048  # poll the clock once per this many nodes, not every node
 DEADLINE: float | None = None  # time to stop at, or None when there is no clock
 
 DELTA_PRUNING_MARGIN = 200  # delta-pruning cushion in centipawns; a guess, tune later
+
+TT_MASK = (1 << 20) - 1  # ~1M entries; power-of-two so `key & TT_MASK` indexes it
+UPPER, EXACT, LOWER = 0, 1, 2  # is the stored score a ceiling, exact, or a floor?
+
+# transposition table: results of positions already searched, keyed by zobrist hash.
+# index -> (zobrist key, depth searched, score, bound kind, best move), or None.
+TT: list[tuple[int, int, int, int, chess.Move] | None] = [None] * (TT_MASK + 1)
 
 
 # Thrown when the search hits the time cap; get_move catches it.
@@ -89,6 +97,7 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
 # branch is cut.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
+# ref: https://www.chessprogramming.org/Transposition_Table
 def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     global NODES
     NODES += 1
@@ -97,9 +106,26 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     if DEADLINE is not None and NODES % CHECK_EVERY == 0 and time.monotonic() >= DEADLINE:
         raise Timeout
 
-    moves = list(board.legal_moves)
-    moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
+    # transposition table probe: have we searched this exact position before?
+    key = chess.polyglot.zobrist_hash(board)
+    entry = TT[key & TT_MASK]
+    tt_move = None
 
+    # entry[0] == key rules out a different position that landed on the same slot
+    if entry is not None and entry[0] == key:
+        _, tt_depth, tt_score, tt_flag, tt_move = entry
+
+        # trust it only if searched at least as deep. an exact score stands; a bound only
+        # when it already proves a cutoff
+        if tt_depth >= depth:
+            if tt_flag == EXACT:
+                return tt_score
+            if tt_flag == LOWER and tt_score >= beta:
+                return tt_score
+            if tt_flag == UPPER and tt_score <= alpha:
+                return tt_score
+
+    moves = list(board.legal_moves)
     # no legal moves: checkmate if in check, else stalemate (a draw)
     if not moves:
         return -MATE_SCORE if board.is_check() else 0
@@ -107,18 +133,37 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     if depth <= 0:
         return quiescence_search(board, alpha, beta)
 
+    # TT's move first (best guess from a past search), then captures by MVV-LVA
+    moves.sort(key=lambda m: (m == tt_move, move_ordering_score(board, m)), reverse=True)
+
+    alpha_original = alpha  # incoming window, kept to tag the stored score below
     best = -MATE_SCORE
+    best_move = moves[0]  # always have a move to store, even if none improves on -MATE_SCORE
+
     for move in moves:
         board.push(move)
         # score the reply from the opponent's side, so negate it and swap the window
         score = -negamax(board, depth - 1, -beta, -alpha)
         board.pop()
 
-        best = max(best, score)
+        if score > best:
+            best = score
+            best_move = move
+
         alpha = max(alpha, score)
         # opponent already has a better option earlier; this branch cannot matter
         if alpha >= beta:
             break
+
+    # record what we learned: an exact value, or which side of the window it fell on
+    if best >= beta:
+        flag = LOWER  # cut early - best is only a floor
+    elif best > alpha_original:
+        flag = EXACT  # raised alpha without cutting - best is exact
+    else:
+        flag = UPPER  # nothing beat alpha - best is a ceiling
+
+    TT[key & TT_MASK] = (key, depth, best, flag, best_move)  # always replace; fine at this size
 
     return best
 
@@ -233,6 +278,8 @@ def get_move(fen: str, time_left_ms: int) -> str:
 def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     global NODES
     NODES = 0
+    TT[:] = [None] * len(TT)  # empty table per position so node counts stay comparable
+
     move, score = search_root(chess.Board(fen), depth)
 
     return move.uci(), score, NODES
