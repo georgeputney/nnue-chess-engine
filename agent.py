@@ -49,6 +49,15 @@ UPPER, EXACT, LOWER = 0, 1, 2  # is the stored score a ceiling, exact, or a floo
 # index -> (zobrist key, depth searched, score, bound kind, best move), or None.
 TT: list[tuple[int, int, int, int, chess.Move] | None] = [None] * (TT_MASK + 1)
 
+# quiet-move ordering signals, both learned during the search (like the TT), both persistent
+# across iterations and moves in a game.
+MAX_HISTORY = 1 << 14  # history score saturates toward +/- this
+
+# the last two quiet moves that caused a cutoff, per remaining-depth slot
+KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_DEPTH + 1)]
+# [piece_type][to_square] -> running tally of how often that quiet move has cut
+HISTORY: list[list[int]] = [[0] * 64 for _ in range(7)]
+
 
 # Thrown when the search hits the time cap; get_move catches it.
 class Timeout(Exception):
@@ -63,6 +72,19 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
         value * (len(board.pieces(piece, side)) - len(board.pieces(piece, not side)))
         for piece, value in PIECE_VALUE.items()
     )
+
+
+# Adjust a quiet move's history score: positive `bonus` when it caused a cutoff, negative
+# when it was tried and did not. The gravity term shrinks the effect as the score nears the
+# cap, so entries saturate instead of running away.
+# ref: https://www.chessprogramming.org/History_Heuristic
+def update_history(board: chess.Board, move: chess.Move, bonus: int) -> None:
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        return
+
+    h = HISTORY[piece.piece_type][move.to_square]
+    HISTORY[piece.piece_type][move.to_square] = h + bonus - h * abs(bonus) // MAX_HISTORY
 
 
 # Ordering score so the likely-best moves are tried first: captures before quiet moves, and
@@ -99,6 +121,8 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
 # ref: https://www.chessprogramming.org/Alpha-Beta
 # ref: https://www.chessprogramming.org/Transposition_Table
 # ref: https://www.chessprogramming.org/Principal_Variation_Search
+# ref: https://www.chessprogramming.org/Killer_Heuristic
+# ref: https://www.chessprogramming.org/History_Heuristic
 def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     global NODES
     NODES += 1
@@ -134,14 +158,25 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     if depth <= 0:
         return quiescence_search(board, alpha, beta)
 
-    # TT's move first (best guess from a past search), then captures by MVV-LVA
-    moves.sort(key=lambda m: (m == tt_move, move_ordering_score(board, m)), reverse=True)
+    # best-first ordering: TT move, then captures by MVV-LVA, then killers, then history
+    moves.sort(
+        key=lambda m: (
+            m == tt_move,
+            move_ordering_score(board, m),
+            m in KILLERS[depth],
+            HISTORY[p.piece_type][m.to_square] if (p := board.piece_at(m.from_square)) else 0,
+        ),
+        reverse=True,
+    )
 
     alpha_original = alpha  # incoming window, kept to tag the stored score below
     best = -MATE_SCORE
     best_move = moves[0]  # always have a move to store, even if none improves on -MATE_SCORE
+    tried_quiets: list[chess.Move] = []  # quiets that didn't cut here - they take the malus
 
     for i, move in enumerate(moves):
+
+        is_quiet = not board.is_capture(move) and not move.promotion
         board.push(move)
 
         if i == 0:
@@ -164,7 +199,21 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
         alpha = max(alpha, score)
         # opponent already has a better option earlier; this branch cannot matter
         if alpha >= beta:
+            if is_quiet:
+                # a quiet move cut: remember it as a killer, reward it, penalise the quiets
+                # that were tried first and failed
+                if move not in KILLERS[depth]:
+                    KILLERS[depth] = [move, KILLERS[depth][0]]
+
+                bonus = depth * depth
+                update_history(board, move, bonus)
+                for q in tried_quiets:
+                    update_history(board, q, -bonus)
+
             break
+
+        if is_quiet:
+            tried_quiets.append(move)  # this move didn't cut
 
     # record what we learned: an exact value, or which side of the window it fell on
     if best >= beta:
@@ -292,7 +341,11 @@ def get_move(fen: str, time_left_ms: int) -> str:
 def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     global NODES
     NODES = 0
+
     TT[:] = [None] * len(TT)  # empty table per position so node counts stay comparable
+    KILLERS[:] = [[None, None] for _ in range(len(KILLERS))]
+    for row in HISTORY:
+        row[:] = [0] * 64
 
     move, score = search_root(chess.Board(fen), depth)
 
