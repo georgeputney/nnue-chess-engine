@@ -92,12 +92,13 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
     return score
 
 
-# Best score for the side to move over `depth` plies of best play. alpha..beta is the score
+# Best score for the side to move over `depth` plies of best play. alpha/beta is the score
 # window still in contention; a result outside it cannot change the chosen move, so the
 # branch is cut.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
 # ref: https://www.chessprogramming.org/Transposition_Table
+# ref: https://www.chessprogramming.org/Principal_Variation_Search
 def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     global NODES
     NODES += 1
@@ -140,10 +141,20 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     best = -MATE_SCORE
     best_move = moves[0]  # always have a move to store, even if none improves on -MATE_SCORE
 
-    for move in moves:
+    for i, move in enumerate(moves):
         board.push(move)
-        # score the reply from the opponent's side, so negate it and swap the window
-        score = -negamax(board, depth - 1, -beta, -alpha)
+
+        if i == 0:
+            # first move: trust the ordering, search it at full width
+            score = -negamax(board, depth - 1, -beta, -alpha)
+        else:
+            # rest: cheap null-window check for "does this beat alpha?"
+            score = -negamax(board, depth - 1, -alpha - 1, -alpha)
+
+            if alpha < score < beta:
+                # it does - re-search at full width for the real score
+                score = -negamax(board, depth - 1, -beta, -alpha)
+
         board.pop()
 
         if score > best:
@@ -157,11 +168,14 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
 
     # record what we learned: an exact value, or which side of the window it fell on
     if best >= beta:
-        flag = LOWER  # cut early - best is only a floor
+        # cut early - best is only a floor
+        flag = LOWER  
     elif best > alpha_original:
-        flag = EXACT  # raised alpha without cutting - best is exact
+        # raised alpha without cutting - best is exact
+        flag = EXACT  
     else:
-        flag = UPPER  # nothing beat alpha - best is a ceiling
+        # nothing beat alpha - best is a ceiling
+        flag = UPPER  
 
     TT[key & TT_MASK] = (key, depth, best, flag, best_move)  # always replace; fine at this size
 
