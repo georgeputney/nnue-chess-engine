@@ -1,16 +1,17 @@
 """
 Submission entry point. The platform imports this module once per game and calls
-get_move(fen, time_left_ms) per move; module state survives between our moves but not into
-the next game, and import gets a 60 s budget before the clock starts.
+get_move(fen, time_left_ms) per move; module state lasts until that game ends, then resets.
+Import runs first, inside a 60 s budget, before our clock starts.
 
-Negamax Alpha-Beta over a material evaluation. docs/plan.md is the phased roadmap.
+An alpha-beta search over a material evaluation, built up in the phases in docs/plan.md.
 """
 
 import time
 
 import chess
 
-# centipawn values; no king, it cancels in any material difference.
+# centipawn value per piece type. no king entry: both sides always have one, so it never
+# affects the difference.
 # ref: https://www.chessprogramming.org/Point_Value
 PIECE_VALUE: dict[chess.PieceType, int] = {
     chess.PAWN: 100,
@@ -20,33 +21,34 @@ PIECE_VALUE: dict[chess.PieceType, int] = {
     chess.QUEEN: 900,
 }
 
-# larger than any real score: +MATE = we mate, -MATE = we are mated / no move yet.
-MATE = 1_000_000
+# sentinel beyond any reachable material total. +MATE = we deliver mate, -MATE = we are
+# mated (also the "no move yet" starting value).
+MATE_SCORE = 1_000_000
 
-# get_move search depth. low because it is unordered and flags deeper; phase 4 is meant to
-# make it a time budget.
-DEPTH = 3
-MAX_DEPTH = 64  # ceiling, so a forced/trivial position can't iterate forever
+# hard ceiling on search depth, so a position of only forced moves cannot deepen forever.
+MAX_DEPTH = 64
 
-
-# nodes seen this search, for tools/nodebench.py; bench_search resets it.
+# nodes visited by the current search. read by tools/nodebench.py; bench_search resets it.
 NODES = 0
 
-# clock fractions: the search may use up to 1/HARD of the remaining time, and will not
-# open a new iteration once 1/SOFT of it is gone. tunable.
-HARD = 4
-SOFT = 40
+# time budget as clock fractions: at most 1/HARD_LIMIT per move, and no new depth once
+# 1/SOFT_LIMIT of the clock has been spent. rough, worth tuning.
+HARD_LIMIT = 4
+SOFT_LIMIT = 40
 
-CHECK_EVERY = 2048      # negamax polls the clock this often (cheap vs. one poll per node)
-DEADLINE: float | None = None   # monotonic deadline for the current get_move; None = no clock
+CHECK_EVERY = 2048  # poll the clock once per this many nodes, not every node
+DEADLINE: float | None = None  # time to stop at, or None when there is no clock
+
+DELTA_PRUNING_MARGIN = 200  # delta-pruning cushion in centipawns; a guess, tune later
 
 
-# raised out of negamax at the hard cap, caught in get_move.
+# Thrown when the search hits the time cap; get_move catches it.
 class Timeout(Exception):
     pass
 
 
-# material balance from `side`'s view, in centipawns, no lookahead.
+# Static score for `side` from material count alone, no search. Positive means `side` is
+# ahead.
 # ref: https://www.chessprogramming.org/Evaluation
 def evaluate(board: chess.Board, side: chess.Color) -> int:
     return sum(
@@ -55,113 +57,170 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
     )
 
 
-# move-ordering score: MVV-LVA for captures (most valuable victim - least valuable aggressor) 
-# plus any promotion gain. quiets score 0 and sort after captures. not the search's idea of value,
-# just an ordering hint.
+# Ordering score so the likely-best moves are tried first: captures before quiet moves, and
+# among captures the most valuable victim taken by the least valuable attacker (MVV-LVA).
 # ref: https://www.chessprogramming.org/MVV-LVA
-def capture_score(board: chess.Board, move: chess.Move) -> int:
+def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
     score = 0
 
+    # value of the captured piece
     if board.is_en_passant(move):
         score = PIECE_VALUE[chess.PAWN]
     else:
         victim = board.piece_at(move.to_square)
-
         if victim is not None:
             score = PIECE_VALUE[victim.piece_type]
 
-    # a capture: victim * 16 keeps it above every quiet (which score 0); the attacker term
-    # only tie-breaks captures of the same victim (cheaper attacker first). king attacker -> 0.
+    # most valuable victim, least valuable attacker. the * 16 keeps every capture ranked
+    # above every quiet move.
     if score:
         attacker = board.piece_at(move.from_square)
         score = score * 16 - (PIECE_VALUE.get(attacker.piece_type, 0) if attacker else 0)
 
+    # promotions are usually worth trying early
     if move.promotion:
         score += PIECE_VALUE[move.promotion] - PIECE_VALUE[chess.PAWN]
 
     return score
 
 
-# value of `board` searched `depth` plies, from the side to move. the caller negates the
-# result and swaps/negates the window (`-beta, -alpha`), since good for the mover is bad
-# for the previous mover. no legal moves = mate (in check) or stalemate. mates are not
-# distance-scored yet (phase 17).
+# Best score for the side to move over `depth` plies of best play. alpha..beta is the score
+# window still in contention; a result outside it cannot change the chosen move, so the
+# branch is cut.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
 def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     global NODES
     NODES += 1
 
+    # abort once the time cap is reached
     if DEADLINE is not None and NODES % CHECK_EVERY == 0 and time.monotonic() >= DEADLINE:
         raise Timeout
 
     moves = list(board.legal_moves)
-    moves.sort(key=lambda m: capture_score(board, m), reverse=True)
+    moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
 
+    # no legal moves: checkmate if in check, else stalemate (a draw)
     if not moves:
-        return -MATE if board.is_check() else 0
-    if depth == 0:
-        return evaluate(board, board.turn)
+        return -MATE_SCORE if board.is_check() else 0
+    # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
+    if depth <= 0:
+        return quiescence_search(board, alpha, beta)
 
-    best = -MATE
+    best = -MATE_SCORE
     for move in moves:
-
         board.push(move)
+        # score the reply from the opponent's side, so negate it and swap the window
         score = -negamax(board, depth - 1, -beta, -alpha)
         board.pop()
 
-        if score > best:
-            best = score
-        if score > alpha:
-            alpha = score
+        best = max(best, score)
+        alpha = max(alpha, score)
+        # opponent already has a better option earlier; this branch cannot matter
         if alpha >= beta:
-            break  # beta cutoff
+            break
 
     return best
 
 
-# root ply: negamax's loop, but keeps the move. seeded so a move is always returned.
-def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
-    best_move = next(iter(board.legal_moves))
-    best_score = -MATE
+# Past the search horizon: keep going through captures only (and every reply when in check)
+# until the position is quiet, then score it - so the search never trusts an eval taken
+# mid-trade. Delta pruning skips captures too small to reach alpha.
+# ref: https://www.chessprogramming.org/Quiescence_Search
+# ref: https://www.chessprogramming.org/Delta_Pruning
+def quiescence_search(board: chess.Board, alpha: int, beta: int) -> int:
+    global NODES
+    NODES += 1
 
-    moves = list(board.legal_moves)
-    moves.sort(key=lambda m: capture_score(board, m), reverse=True)
+    # abort once the time cap is reached
+    if DEADLINE is not None and NODES % CHECK_EVERY == 0 and time.monotonic() >= DEADLINE:
+        raise Timeout
+
+    in_check = board.is_check()
+    if in_check:
+        # can't standing pat out of check: search every reply
+        moves = list(board.legal_moves)
+
+        if not moves:
+            return -MATE_SCORE
+    else:
+        # the side to move can decline to capture, so the static evaluation is a floor
+        standing_pat = evaluate(board, board.turn)
+
+        if standing_pat >= beta:
+            return standing_pat
+
+        alpha = max(alpha, standing_pat)
+        moves = list(board.generate_legal_captures())
+
+    moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
 
     for move in moves:
+        # delta pruning: if winning this piece plus a margin still falls short of alpha,
+        # so does every smaller capture after it (list is biggest-victim first)
+        if not in_check and not move.promotion:
+            if board.is_en_passant(move):
+                victim = PIECE_VALUE[chess.PAWN]
+            else:
+                piece = board.piece_at(move.to_square)
+                victim = PIECE_VALUE[piece.piece_type] if piece else 0
+
+            if standing_pat + victim + DELTA_PRUNING_MARGIN < alpha:
+                break
 
         board.push(move)
-        score = -negamax(board, depth - 1, -MATE, MATE)
+        score = -quiescence_search(board, -beta, -alpha)
         board.pop()
 
-        if score > best_score:  # strict, so ties keep the earlier move
+        alpha = max(alpha, score)
+        if alpha >= beta:
+            break
+
+    return alpha
+
+
+# Root of the search: negamax's move loop, but it keeps the best move, not just the score.
+# Seeded with the first legal move so it always returns one.
+def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
+    best_move = next(iter(board.legal_moves))
+    best_score = -MATE_SCORE
+
+    moves = list(board.legal_moves)
+    moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
+
+    for move in moves:
+        board.push(move)
+        score = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE)
+        board.pop()
+
+        if score > best_score:  # strict, so ties keep the earlier (better-ordered) move
             best_score = score
             best_move = move
 
     return best_move, best_score
 
 
-# entry point. deepens from depth 1 until the soft cap, keeping the last finished
-# iteration's move; a Timeout mid-iteration is discarded. returns UCI.
+# The platform's per-move entry point. Deepens one ply at a time until the clock stops it,
+# returning the best move from the last depth that completed.
 def get_move(fen: str, time_left_ms: int) -> str:
     global DEADLINE
 
     board = chess.Board(fen)
     start = time.monotonic()
 
-    DEADLINE = start + time_left_ms / HARD / 1000  # abort at start + 1/HARD of the clock (ms -> s)
-    soft_cap = time_left_ms / SOFT / 1000  # elapsed past this: don't open another depth (seconds)
+    # a hard deadline to abort at, and a soft cap past which no new depth is started
+    DEADLINE = start + time_left_ms / HARD_LIMIT / 1000
+    soft_cap = time_left_ms / SOFT_LIMIT / 1000
 
     best = next(iter(board.legal_moves))  # fallback if depth 1 itself times out
     try:
-        for depth in range(1, MAX_DEPTH - 1):
-
+        for depth in range(1, MAX_DEPTH):
             if time.monotonic() - start >= soft_cap:
                 break
 
             move, _ = search_root(board, depth)
-            best = move
-            
+            best = move  # depth completed, adopt its move
+
     except Timeout:
         pass
     finally:
@@ -170,7 +229,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
     return best.uci()
 
 
-# tools/nodebench.py hook: same search to a set depth, returning (move, score, nodes).
+# tools/nodebench.py hook, not used in games: fixed-depth search returning (move, score, nodes).
 def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     global NODES
     NODES = 0

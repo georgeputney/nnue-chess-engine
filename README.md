@@ -58,6 +58,7 @@ it in rated games and shows it in the validation log.
 Most of this repo, the `harness/`, the `baselines/`, the packaging, and the `agent.py` scaffold,
 is the [AI Chessathon starter](https://github.com/advitrocks9/aichessathon-starter) by Advit
 Arora, used under the MIT License (see `LICENSE`). My work is the engine in `agent.py`.
+`PROVENANCE.md` has the file-by-file split.
 
 ## The competition
 
