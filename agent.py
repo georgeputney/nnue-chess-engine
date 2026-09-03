@@ -80,6 +80,8 @@ KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_DEPTH 
 # [piece_type][to_square] -> running tally of how often that quiet move has cut
 HISTORY: list[list[int]] = [[0] * 64 for _ in range(7)]
 
+RFP_MAX_DEPTH = 6   # only prune at shallow depth
+RFP_MARGIN = 90     # centipawns of allowed decline per ply; plan says 70-120, tune
 
 # Thrown when the search hits the time cap; get_move catches it.
 class Timeout(Exception):
@@ -268,6 +270,20 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
         return quiescence_search(board, alpha, beta)
+
+    # reverse futility pruning: at a shallow non-PV node, if the static eval beats beta by
+    # more than a per-ply margin, the search almost certainly fails high - return early.
+    # ref: https://www.chessprogramming.org/Reverse_Futility_Pruning
+    if (
+        depth <= RFP_MAX_DEPTH
+        and not board.is_check()
+        and beta - alpha == 1  # non-PV
+        and abs(beta) < MATE_SCORE - MAX_DEPTH  # not a mate bound
+    ):
+        static_eval = evaluate(board, board.turn)
+
+        if static_eval - RFP_MARGIN * depth >= beta:
+            return static_eval
 
     # null-move pruning: hand the opponent a free move and search shallow. if we still beat
     # beta after passing, the real move almost certainly cuts too - prune. guards: not in
