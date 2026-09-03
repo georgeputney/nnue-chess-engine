@@ -215,20 +215,31 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
 
 # Best score for the side to move over `depth` plies of best play. alpha/beta is the score
 # window still in contention; a result outside it cannot change the chosen move, so the
-# branch is cut.
+# branch is cut. `ply` is the distance from the root - only used to bound check extensions.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
 # ref: https://www.chessprogramming.org/Transposition_Table
 # ref: https://www.chessprogramming.org/Principal_Variation_Search
 # ref: https://www.chessprogramming.org/Killer_Heuristic
 # ref: https://www.chessprogramming.org/History_Heuristic
-def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
+# ref: https://www.chessprogramming.org/Check_Extensions
+def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> int:
     global NODES
     NODES += 1
 
     # abort once the time cap is reached
     if DEADLINE is not None and NODES % CHECK_EVERY == 0 and time.monotonic() >= DEADLINE:
         raise Timeout
+
+    # threefold repetition is a draw. checking for the third occurrence (not the second)
+    # keeps this from firing on a position the game has only reached once for real.
+    if board.is_repetition(3):
+        return 0
+
+    # recursion floor: a checking sequence extends every ply, so `depth` never falls -
+    # this stops it running away
+    if ply >= MAX_DEPTH:
+        return evaluate(board, board.turn)
 
     # transposition table probe: have we searched this exact position before?
     key = chess.polyglot.zobrist_hash(board)
@@ -249,37 +260,34 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
             if tt_flag == UPPER and tt_score <= alpha:
                 return tt_score
 
-    # --- null-move pruning (deferred, see below) ---
-    # Pass our turn and search shallow: if that still beats beta, our real move does too, so
-    # cut. Guards: not in check, non-PV (zero window), depth >= 3, and non-pawn material for
-    # the side to move (in a pawn ending, being forced to move usually hurts, so the logic
-    # inverts).
-    # Implemented and correct, but A/B vs the phase 9.5 snapshot showed no gain - eval-gated
-    # +17 [-21, +56], ungated -17 [-54, +19], and it lost games to a version without it. NMP
-    # earns its keep at higher depth with a trustworthy eval; revisit after phase 18. On
-    # re-enable, move this below the `not moves` / `depth <= 0` checks.
-    # ref: https://www.chessprogramming.org/Null_Move_Pruning
-    #
-    # R = 2 + depth // 6                                # reduction; deeper -> larger cut
-    # if (
-    #     not board.is_check()
-    #     and beta - alpha == 1                         # zero window = non-PV node
-    #     and depth >= 3
-    #     and board.occupied_co[board.turn] & ~board.pawns & ~board.kings  # has a piece to lose
-    # ):
-    #     board.push(chess.Move.null())                 # skip our turn
-    #     score = -negamax(board, depth - 1 - R, -beta, -beta + 1)  # shallow, zero-window
-    #     board.pop()
-    #     if score >= beta:
-    #         return beta                               # too good even after passing - prune
-
     moves = list(board.legal_moves)
     # no legal moves: checkmate if in check, else stalemate (a draw)
     if not moves:
         return -MATE_SCORE if board.is_check() else 0
+    
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
         return quiescence_search(board, alpha, beta)
+
+    # null-move pruning: hand the opponent a free move and search shallow. if we still beat
+    # beta after passing, the real move almost certainly cuts too - prune. guards: not in
+    # check, non-PV (zero window), depth to spare, and non-pawn material for the side to move
+    # (in a pawn ending, being forced to move often helps the opponent - zugzwang - so the
+    # "passing only hurts me" assumption breaks).
+    # ref: https://www.chessprogramming.org/Null_Move_Pruning
+    reduction = 2 + depth // 6  # deeper -> cut more
+    if (
+        not board.is_check()
+        and beta - alpha == 1  # zero window = a non-PV node
+        and depth >= 3
+        and board.occupied_co[board.turn] & ~board.pawns & ~board.kings  # a piece to lose
+    ):
+        board.push(chess.Move.null())  # skip our turn
+        score = -negamax(board, depth - 1 - reduction, -beta, -beta + 1, ply + 1)
+        board.pop()
+
+        if score >= beta:
+            return score  # too good even after passing
 
     # best-first ordering: TT move, then captures by MVV-LVA, then killers, then history
     moves.sort(
@@ -298,20 +306,23 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     tried_quiets: list[chess.Move] = []  # quiets that didn't cut here - they take the malus
 
     for i, move in enumerate(moves):
-
+        # check extension: a checking move forces the reply, so search that line a ply deeper.
+        # the `ply >= MAX_DEPTH` floor above stops a run of checks deepening forever.
+        extension = 1 if board.gives_check(move) else 0
         is_quiet = not board.is_capture(move) and not move.promotion
+
         board.push(move)
 
         if i == 0:
             # first move: trust the ordering, search it at full width
-            score = -negamax(board, depth - 1, -beta, -alpha)
+            score = -negamax(board, depth - 1 + extension, -beta, -alpha, ply + 1)
         else:
             # rest: cheap null-window check for "does this beat alpha?"
-            score = -negamax(board, depth - 1, -alpha - 1, -alpha)
+            score = -negamax(board, depth - 1 + extension, -alpha - 1, -alpha, ply + 1)
 
             if alpha < score < beta:
                 # it does - re-search at full width for the real score
-                score = -negamax(board, depth - 1, -beta, -alpha)
+                score = -negamax(board, depth - 1 + extension, -beta, -alpha, ply + 1)
 
         board.pop()
 
@@ -341,13 +352,13 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
     # record what we learned: an exact value, or which side of the window it fell on
     if best >= beta:
         # cut early - best is only a floor
-        flag = LOWER  
+        flag = LOWER
     elif best > alpha_original:
         # raised alpha without cutting - best is exact
-        flag = EXACT  
+        flag = EXACT
     else:
         # nothing beat alpha - best is a ceiling
-        flag = UPPER  
+        flag = UPPER
 
     TT[key & TT_MASK] = (key, depth, best, flag, best_move)  # always replace; fine at this size
 
@@ -421,7 +432,7 @@ def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
 
     for move in moves:
         board.push(move)
-        score = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE)
+        score = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE, 0)
         board.pop()
 
         if score > best_score:  # strict, so ties keep the earlier (better-ordered) move
