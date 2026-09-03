@@ -262,30 +262,6 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int) -> int:
             if tt_flag == UPPER and tt_score <= alpha:
                 return tt_score
 
-    # --- null-move pruning (deferred, see below) ---
-    # Pass our turn and search shallow: if that still beats beta, our real move does too, so
-    # cut. Guards: not in check, non-PV (zero window), depth >= 3, and non-pawn material for
-    # the side to move (in a pawn ending, being forced to move usually hurts, so the logic
-    # inverts).
-    # Implemented and correct, but A/B vs the phase 9.5 snapshot showed no gain - eval-gated
-    # +17 [-21, +56], ungated -17 [-54, +19], and it lost games to a version without it. NMP
-    # earns its keep at higher depth with a trustworthy eval; revisit after phase 18. On
-    # re-enable, move this below the `not moves` / `depth <= 0` checks.
-    # ref: https://www.chessprogramming.org/Null_Move_Pruning
-    #
-    # R = 2 + depth // 6                                # reduction; deeper -> larger cut
-    # if (
-    #     not board.is_check()
-    #     and beta - alpha == 1                         # zero window = non-PV node
-    #     and depth >= 3
-    #     and board.occupied_co[board.turn] & ~board.pawns & ~board.kings  # has a piece to lose
-    # ):
-    #     board.push(chess.Move.null())                 # skip our turn
-    #     score = -negamax(board, depth - 1 - R, -beta, -beta + 1)  # shallow, zero-window
-    #     board.pop()
-    #     if score >= beta:
-    #         return beta                               # too good even after passing - prune
-
     moves = list(board.legal_moves)
     # no legal moves: checkmate if in check, else stalemate (a draw)
     if not moves:
