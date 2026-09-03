@@ -11,6 +11,7 @@ kit; this file records which is which.
 | `docs/plan.md` | The build roadmap and the measurement discipline behind each change. |
 | `tools/bench.py` | Openings-based A/B match runner (score, Elo, 95% band). |
 | `tools/nodebench.py` | Fixed-depth node-count bench for verifying search refactors are exact. |
+| `tools/tune.py` | Offline Texel tuner: fits the evaluation weights to game results and writes `tables.py`. |
 | `README.md` | Rewritten (the starter shipped its own). |
 
 ## Vendored: the AI Chessathon starter

@@ -1,0 +1,6 @@
+# Data sources for tools/tune.py. One line per file: path, wdl-from-side-to-move (0 = white
+# POV), limit (0 = all). data/ is git-ignored; fetch a corpus yourself.
+#
+# quiet-labeled.epd: ~725k quiet positions with game results, the standard Texel set from
+# Zurichess (https://bitbucket.org/zurichess/tuner/downloads/, quiet-labeled.epd).
+data/quiet-labeled.epd,0,0
