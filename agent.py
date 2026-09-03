@@ -6,6 +6,7 @@ Import runs first, inside a 60 s budget, before our clock starts.
 An alpha-beta search over a Texel-tuned tapered evaluation, built up in the phases in docs/plan.md.
 """
 
+import math
 import time
 
 import chess
@@ -87,6 +88,18 @@ HISTORY: list[list[int]] = [[0] * 64 for _ in range(7)]
 
 RFP_MAX_DEPTH = 6   # only prune at shallow depth
 RFP_MARGIN = 90     # centipawns of allowed decline per ply; plan says 70-120, tune
+
+LMR_MIN_DEPTH = 3   # don't reduce within a few plies of the horizon
+LMR_MIN_MOVE = 3    # the first few moves at a node are searched at full depth
+
+# reduction amount indexed [depth][move index] - the widely used log-formula shape. built
+# once at import so the search never calls math.log per node.
+# ref: https://www.chessprogramming.org/Late_Move_Reductions
+_LMR = [[0] * 64 for _ in range(64)]
+for _d in range(1, 64):
+    for _i in range(1, 64):
+        _LMR[_d][_i] = int(0.75 + math.log(_d) * math.log(_i) / 2.25)
+
 
 # Thrown when the search hits the time cap; get_move catches it.
 class Timeout(Exception):
@@ -362,16 +375,28 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
 
         board.push(move)
 
-        if i == 0:
-            # first move: trust the ordering, search it at full width
-            score = -negamax(board, depth - 1 + extension, -beta, -alpha, ply + 1)
-        else:
-            # rest: cheap null-window check for "does this beat alpha?"
-            score = -negamax(board, depth - 1 + extension, -alpha - 1, -alpha, ply + 1)
+        new_depth = depth - 1 + extension  # the check extension, if any, folds in here
 
+        if i == 0:
+            # the move the ordering trusts most - search it at full width
+            score = -negamax(board, new_depth, -beta, -alpha, ply + 1)
+        else:
+            # late move reductions: a quiet move past the first few is unlikely to be best,
+            # so probe it shallower and only pay full depth if it beats alpha anyway.
+            reduction = 0
+            if is_quiet and extension == 0 and depth >= LMR_MIN_DEPTH and i >= LMR_MIN_MOVE:
+                reduction = min(_LMR[min(depth, 63)][min(i, 63)], new_depth - 1)
+
+            # reduced, null window: is this move even worth a closer look?
+            score = -negamax(board, new_depth - reduction, -alpha - 1, -alpha, ply + 1)
+
+            # it cleared alpha despite the cut - redo at full depth, still null window
+            if reduction and score > alpha:
+                score = -negamax(board, new_depth, -alpha - 1, -alpha, ply + 1)
+
+            # a full-depth score inside the window needs the real, full-window search
             if alpha < score < beta:
-                # it does - re-search at full width for the real score
-                score = -negamax(board, depth - 1 + extension, -beta, -alpha, ply + 1)
+                score = -negamax(board, new_depth, -beta, -alpha, ply + 1)
 
         board.pop()
 
