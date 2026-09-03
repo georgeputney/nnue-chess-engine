@@ -3,7 +3,7 @@ Submission entry point. The platform imports this module once per game and calls
 get_move(fen, time_left_ms) per move; module state lasts until that game ends, then resets.
 Import runs first, inside a 60 s budget, before our clock starts.
 
-An alpha-beta search over a material evaluation, built up in the phases in docs/plan.md.
+An alpha-beta search over a piece-square evaluation, built up in the phases in docs/plan.md.
 """
 
 import time
@@ -22,6 +22,96 @@ PIECE_VALUE: dict[chess.PieceType, int] = {
     chess.QUEEN: 900,
 }
 
+# fmt: off
+# piece-square tables: positional bonus (centipawns) per square, white's view. index is the
+# square number (a1 = 0); a black piece mirrors with `sq ^ 56`. seeded, not yet tuned.
+# ref: https://www.chessprogramming.org/Simplified_Evaluation_Function
+_PST_PAWN = [
+      0,   0,   0,   0,   0,   0,   0,   0,
+      5,  10,  10, -20, -20,  10,  10,   5,
+      5,  -5, -10,   0,   0, -10,  -5,   5,
+      0,   0,   0,  20,  20,   0,   0,   0,
+      5,   5,  10,  25,  25,  10,   5,   5,
+     10,  10,  20,  30,  30,  20,  10,  10,
+     50,  50,  50,  50,  50,  50,  50,  50,
+      0,   0,   0,   0,   0,   0,   0,   0,
+]
+_PST_KNIGHT = [
+    -50, -40, -30, -30, -30, -30, -40, -50,
+    -40, -20,   0,   5,   5,   0, -20, -40,
+    -30,   5,  10,  15,  15,  10,   5, -30,
+    -30,   0,  15,  20,  20,  15,   0, -30,
+    -30,   5,  15,  20,  20,  15,   5, -30,
+    -30,   0,  10,  15,  15,  10,   0, -30,
+    -40, -20,   0,   0,   0,   0, -20, -40,
+    -50, -40, -30, -30, -30, -30, -40, -50,
+]
+_PST_BISHOP = [
+    -20, -10, -10, -10, -10, -10, -10, -20,
+    -10,   5,   0,   0,   0,   0,   5, -10,
+    -10,  10,  10,  10,  10,  10,  10, -10,
+    -10,   0,  10,  10,  10,  10,   0, -10,
+    -10,   5,   5,  10,  10,   5,   5, -10,
+    -10,   0,   5,  10,  10,   5,   0, -10,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -20, -10, -10, -10, -10, -10, -10, -20,
+]
+_PST_ROOK = [
+      0,   0,   0,   5,   5,   0,   0,   0,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+      5,  10,  10,  10,  10,  10,  10,   5,
+      0,   0,   0,   0,   0,   0,   0,   0,
+]
+_PST_QUEEN = [
+    -20, -10, -10,  -5,  -5, -10, -10, -20,
+    -10,   0,   5,   0,   0,   0,   0, -10,
+    -10,   5,   5,   5,   5,   5,   0, -10,
+      0,   0,   5,   5,   5,   5,   0,  -5,
+     -5,   0,   5,   5,   5,   5,   0,  -5,
+    -10,   0,   5,   5,   5,   5,   0, -10,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -20, -10, -10,  -5,  -5, -10, -10, -20,
+]
+_PST_KING_MG = [
+     20,  30,  10,   0,   0,  10,  30,  20,
+     20,  20,   0,   0,   0,   0,  20,  20,
+    -10, -20, -20, -20, -20, -20, -20, -10,
+    -20, -30, -30, -40, -40, -30, -30, -20,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+]
+KING_EG = [
+    -50, -30, -30, -30, -30, -30, -30, -50,
+    -30, -30,   0,   0,   0,   0, -30, -30,
+    -30, -10,  20,  30,  30,  20, -10, -30,
+    -30, -10,  30,  40,  40,  30, -10, -30,
+    -30, -10,  30,  40,  40,  30, -10, -30,
+    -30, -10,  20,  30,  30,  20, -10, -30,
+    -30, -20, -10,   0,   0, -10, -20, -30,
+    -50, -40, -30, -20, -20, -30, -40, -50,
+]
+# fmt: on
+
+PST: dict[chess.PieceType, list[int]] = {
+    chess.PAWN: _PST_PAWN,
+    chess.KNIGHT: _PST_KNIGHT,
+    chess.BISHOP: _PST_BISHOP,
+    chess.ROOK: _PST_ROOK,
+    chess.QUEEN: _PST_QUEEN,
+    chess.KING: _PST_KING_MG,
+}
+
+# tapering weight per piece type; a full board sums to 24, bare kings to 0.
+PHASE_WEIGHT: dict[chess.PieceType, int] = {
+    chess.KNIGHT: 1, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 4,
+}
+
 # sentinel beyond any reachable material total. +MATE = we deliver mate, -MATE = we are
 # mated (also the "no move yet" starting value).
 MATE_SCORE = 1_000_000
@@ -37,7 +127,7 @@ NODES = 0
 HARD_LIMIT = 4
 SOFT_LIMIT = 40
 
-CHECK_EVERY = 2048  # poll the clock once per this many nodes, not every node
+CHECK_EVERY = 1024  # poll the clock every this many nodes; smaller = less overshoot past DEADLINE
 DEADLINE: float | None = None  # time to stop at, or None when there is no clock
 
 DELTA_PRUNING_MARGIN = 200  # delta-pruning cushion in centipawns; a guess, tune later
@@ -64,14 +154,36 @@ class Timeout(Exception):
     pass
 
 
-# Static score for `side` from material count alone, no search. Positive means `side` is
-# ahead.
-# ref: https://www.chessprogramming.org/Evaluation
+# Material plus piece-square tables, from `side`'s point of view. The king's table is
+# tapered between a midgame set (stay tucked away) and an endgame set (come to the centre).
+# ref: https://www.chessprogramming.org/Piece-Square_Tables
+# ref: https://www.chessprogramming.org/Tapered_Eval
 def evaluate(board: chess.Board, side: chess.Color) -> int:
-    return sum(
-        value * (len(board.pieces(piece, side)) - len(board.pieces(piece, not side)))
-        for piece, value in PIECE_VALUE.items()
+    phase = game_phase(board)
+    score = 0  # white's point of view
+
+    for square, piece in board.piece_map().items():
+        i = square if piece.color == chess.WHITE else square ^ 56
+
+        if piece.piece_type == chess.KING:
+            positional = (_PST_KING_MG[i] * phase + KING_EG[i] * (24 - phase)) // 24
+        else:
+            positional = PST[piece.piece_type][i]
+
+        value = PIECE_VALUE.get(piece.piece_type, 0) + positional
+        score += value if piece.color == chess.WHITE else -value
+
+    return score if side == chess.WHITE else -score
+
+
+# How far into the endgame the position is: 24 = every piece on, 0 = only kings and pawns.
+def game_phase(board: chess.Board) -> int:
+    phase = sum(
+        weight * len(board.pieces(pt, colour))
+        for pt, weight in PHASE_WEIGHT.items()
+        for colour in (chess.WHITE, chess.BLACK)
     )
+    return min(phase, 24)
 
 
 # Adjust a quiet move's history score: positive `bonus` when it caused a cutoff, negative
@@ -316,8 +428,9 @@ def get_move(fen: str, time_left_ms: int) -> str:
     board = chess.Board(fen)
     start = time.monotonic()
 
-    # a hard deadline to abort at, and a soft cap past which no new depth is started
-    DEADLINE = start + time_left_ms / HARD_LIMIT / 1000
+    # hard deadline to abort at - the 50 ms is slack for the node batch that runs past the
+    # last clock check plus move-gen and the reply; soft cap past which no new depth starts
+    DEADLINE = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
     soft_cap = time_left_ms / SOFT_LIMIT / 1000
 
     best = next(iter(board.legal_moves))  # fallback if depth 1 itself times out
