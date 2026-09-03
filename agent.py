@@ -51,6 +51,11 @@ MATE_SCORE = 1_000_000
 # hard ceiling on search depth, so a position of only forced moves cannot deepen forever.
 MAX_DEPTH = 64
 
+# a score at or past this magnitude encodes a forced mate; MATE_SCORE - |score| is its
+# distance in plies. no real evaluation comes near it. the 2x leaves headroom for the extra
+# plies quiescence can add past MAX_DEPTH on a checking sequence.
+MATE_THRESHOLD = MATE_SCORE - 2 * MAX_DEPTH
+
 # nodes visited by the current search. read by tools/nodebench.py; bench_search resets it.
 NODES = 0
 
@@ -215,9 +220,31 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
     return score
 
 
+# A mate score carries its distance from the root as MATE_SCORE - plies, so a faster mate
+# scores higher. That distance is root-relative, so a score stored in the TT at one ply
+# cannot be read back verbatim at another: re-root it to the storing node on the way in and
+# back to the current node on the way out.
+# ref: https://www.chessprogramming.org/Score_Bounds_in_the_TT#Mate_Scores
+def score_to_tt(score: int, ply: int) -> int:
+    if score >= MATE_THRESHOLD:
+        return score + ply
+    if score <= -MATE_THRESHOLD:
+        return score - ply
+    return score
+
+
+def score_from_tt(score: int, ply: int) -> int:
+    if score >= MATE_THRESHOLD:
+        return score - ply
+    if score <= -MATE_THRESHOLD:
+        return score + ply
+    return score
+
+
 # Best score for the side to move over `depth` plies of best play. alpha/beta is the score
 # window still in contention; a result outside it cannot change the chosen move, so the
-# branch is cut. `ply` is the distance from the root - only used to bound check extensions.
+# branch is cut. `ply` is the distance from the root - bounds check extensions and scales
+# mate scores.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
 # ref: https://www.chessprogramming.org/Transposition_Table
@@ -239,8 +266,11 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         return 0
 
     # recursion floor: a checking sequence extends every ply, so `depth` never falls -
-    # this stops it running away
+    # this stops it running away. don't stand pat out of check here: if it's mate the
+    # static eval would badly misjudge it, so resolve no-legal-moves first.
     if ply >= MAX_DEPTH:
+        if board.is_check() and not any(board.generate_legal_moves()):
+            return -MATE_SCORE + ply
         return evaluate(board, board.turn)
 
     # transposition table probe: have we searched this exact position before?
@@ -251,6 +281,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     # entry[0] == key rules out a different position that landed on the same slot
     if entry is not None and entry[0] == key:
         _, tt_depth, tt_score, tt_flag, tt_move = entry
+        tt_score = score_from_tt(tt_score, ply)  # re-root a stored mate score to this node
 
         # trust it only if searched at least as deep. an exact score stands; a bound only
         # when it already proves a cutoff
@@ -263,13 +294,14 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
                 return tt_score
 
     moves = list(board.legal_moves)
-    # no legal moves: checkmate if in check, else stalemate (a draw)
+    # no legal moves: checkmate if in check, else stalemate (a draw). the +ply makes a mate
+    # found sooner score higher once negated back up the tree.
     if not moves:
-        return -MATE_SCORE if board.is_check() else 0
+        return -MATE_SCORE + ply if board.is_check() else 0
     
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
-        return quiescence_search(board, alpha, beta)
+        return quiescence_search(board, alpha, beta, ply)
 
     # reverse futility pruning: at a shallow non-PV node, if the static eval beats beta by
     # more than a per-ply margin, the search almost certainly fails high - return early.
@@ -278,7 +310,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         depth <= RFP_MAX_DEPTH
         and not board.is_check()
         and beta - alpha == 1  # non-PV
-        and abs(beta) < MATE_SCORE - MAX_DEPTH  # not a mate bound
+        and abs(beta) < MATE_THRESHOLD  # not a mate bound
     ):
         static_eval = evaluate(board, board.turn)
 
@@ -323,8 +355,9 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
 
     for i, move in enumerate(moves):
         # check extension: a checking move forces the reply, so search that line a ply deeper.
-        # the `ply >= MAX_DEPTH` floor above stops a run of checks deepening forever.
-        extension = 1 if board.gives_check(move) else 0
+        # only extend while the child stays inside the ceiling, so the extension itself never
+        # drives `ply` past MAX_DEPTH - the floor above is just the backstop.
+        extension = 1 if board.gives_check(move) and ply + 1 < MAX_DEPTH else 0
         is_quiet = not board.is_capture(move) and not move.promotion
 
         board.push(move)
@@ -376,7 +409,8 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         # nothing beat alpha - best is a ceiling
         flag = UPPER
 
-    TT[key & TT_MASK] = (key, depth, best, flag, best_move)  # always replace; fine at this size
+    # store the mate distance relative to this node, not the root, so it reads back correctly
+    TT[key & TT_MASK] = (key, depth, score_to_tt(best, ply), flag, best_move)  # always replace
 
     return best
 
@@ -386,7 +420,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
 # mid-trade. Delta pruning skips captures too small to reach alpha.
 # ref: https://www.chessprogramming.org/Quiescence_Search
 # ref: https://www.chessprogramming.org/Delta_Pruning
-def quiescence_search(board: chess.Board, alpha: int, beta: int) -> int:
+def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> int:
     global NODES
     NODES += 1
 
@@ -400,7 +434,7 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int) -> int:
         moves = list(board.legal_moves)
 
         if not moves:
-            return -MATE_SCORE
+            return -MATE_SCORE + ply  # checkmate; +ply so a nearer one scores higher
     else:
         # the side to move can decline to capture, so the static evaluation is a floor
         standing_pat = evaluate(board, board.turn)
@@ -409,7 +443,13 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int) -> int:
             return standing_pat
 
         alpha = max(alpha, standing_pat)
+
+        # captures, plus quiet promotions: a pawn pushing to the back rank swings the eval
+        # as much as any capture, so the quiet search has to see e7e8q too. restricting the
+        # generator to pawns landing on empty back-rank squares keeps this off the hot path.
+        back_rank = chess.BB_RANK_8 if board.turn == chess.WHITE else chess.BB_RANK_1
         moves = list(board.generate_legal_captures())
+        moves += board.generate_legal_moves(board.pawns, back_rank & ~board.occupied)
 
     moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
 
@@ -427,7 +467,7 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int) -> int:
                 break
 
         board.push(move)
-        score = -quiescence_search(board, -beta, -alpha)
+        score = -quiescence_search(board, -beta, -alpha, ply + 1)
         board.pop()
 
         alpha = max(alpha, score)
@@ -448,7 +488,8 @@ def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
 
     for move in moves:
         board.push(move)
-        score = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE, 0)
+        # ply 1: the child is one move from the root, so a mate there is mate in 1
+        score = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE, 1)
         board.pop()
 
         if score > best_score:  # strict, so ties keep the earlier (better-ordered) move
@@ -461,7 +502,8 @@ def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
 # The platform's per-move entry point. Deepens one ply at a time until the clock stops it,
 # returning the best move from the last depth that completed.
 def get_move(fen: str, time_left_ms: int) -> str:
-    global DEADLINE
+    global DEADLINE, NODES
+    NODES = 0  # per-move, so the CHECK_EVERY clock poll doesn't inherit the last move's phase
 
     board = chess.Board(fen)
     start = time.monotonic()
