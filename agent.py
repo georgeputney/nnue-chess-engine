@@ -310,6 +310,15 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     if board.is_repetition(3):
         return 0
 
+    # mate-distance pruning: we cannot be mated sooner than `ply` from here, nor deliver
+    # mate sooner than `ply + 1`. clamp the window to that band; if it collapses, no move
+    # at this node can change the result.
+    # ref: https://www.chessprogramming.org/Score#Mate_Distance_Pruning
+    alpha = max(alpha, ply - MATE_SCORE)
+    beta = min(beta, MATE_SCORE - ply - 1)
+    if alpha >= beta:
+        return alpha
+
     # recursion floor: a checking sequence extends every ply, so `depth` never falls -
     # this stops it running away. don't stand pat out of check here: if it's mate the
     # static eval would badly misjudge it, so resolve no-legal-moves first.
