@@ -105,6 +105,13 @@ LMR_MIN_MOVE = 3    # the first few moves at a node are searched at full depth
 # ref: https://www.chessprogramming.org/Internal_Iterative_Reductions
 IIR_MIN_DEPTH = 7  # fires only in deeper searches, where losing a ply to it is cheap
 
+# aspiration windows: past a few plies the score barely moves between iterations, so open
+# the next one a thin band around the last score and only widen on a fail. the re-search
+# must use the widened window, not the one that just failed.
+# ref: https://www.chessprogramming.org/Aspiration_Windows
+ASPIRATION_MIN_DEPTH = 4
+ASPIRATION_WINDOW = 25  # half-width in centipawns; widened geometrically on a miss
+
 # reduction amount indexed [depth][move index] - the widely used log-formula shape. built
 # once at import so the search never calls math.log per node.
 # ref: https://www.chessprogramming.org/Late_Move_Reductions
@@ -555,11 +562,10 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
     return alpha
 
 
-# Root of the search: negamax's move loop, but it keeps the best move, not just the score.
-# `prev_best` (last iteration's choice) is tried first, the rest fall back to MVV-LVA, and
-# the moves after the first are scouted with a null window and only re-searched if they beat
-# alpha - so the root prunes the same way every interior node does.
-# ref: https://www.chessprogramming.org/Principal_Variation_Search
+# Root of the search: negamax's move loop, but it keeps the best move, not just the score,
+# and runs inside the caller's aspiration window. `prev_best` (last iteration's choice) is
+# tried first, the rest fall back to MVV-LVA. A returned score that reached alpha or beta is
+# only a bound - get_move widens the window and calls again.
 def search_root(
     board: chess.Board, depth: int, alpha: int, beta: int, prev_best: chess.Move | None
 ) -> tuple[chess.Move, int]:
@@ -578,10 +584,10 @@ def search_root(
             # this move repeats a position twice over - a draw
             score = 0
         elif i == 0:
-            # the move the ordering trusts most - full window
+            # ply 1: the child is one move from the root, so a mate there is mate in 1
             score = -negamax(board, depth - 1, -beta, -alpha, 1)
         else:
-            # scout with a null window; re-search full only if it beats alpha
+            # scout the rest with a null window; re-search only the ones that beat alpha
             score = -negamax(board, depth - 1, -alpha - 1, -alpha, 1)
             if alpha < score < beta:
                 score = -negamax(board, depth - 1, -beta, -alpha, 1)
@@ -599,7 +605,7 @@ def search_root(
 
         alpha = max(alpha, best_score)
         if alpha >= beta:
-            break  # fail-high: nothing else at the root can change the choice
+            break  # fail-high: this move beats the window; get_move widens and re-searches
 
     return best_move, best_score
 
@@ -626,13 +632,36 @@ def get_move(fen: str, time_left_ms: int) -> str:
     AVOID = PLAYED.get(key) if seen else None
 
     best = next(iter(board.legal_moves))  # fallback if depth 1 itself times out
+    score = 0
     try:
         for depth in range(1, MAX_DEPTH):
-            if time.monotonic() - start >= soft_cap:
+            if depth > 1 and time.monotonic() - start >= soft_cap:
                 break
 
-            move, _ = search_root(board, depth, -MATE_SCORE, MATE_SCORE, best)
-            best = move  # depth completed, adopt its move
+            # aspiration: a thin band around the last score past the opening plies, full
+            # width before that. widen geometrically on whichever side failed and re-search
+            # with the widened window - not the one that just failed.
+            if depth <= ASPIRATION_MIN_DEPTH:
+                alpha, beta = -MATE_SCORE, MATE_SCORE
+            else:
+                alpha, beta = score - ASPIRATION_WINDOW, score + ASPIRATION_WINDOW
+            delta = ASPIRATION_WINDOW
+
+            while True:
+                move, value = search_root(board, depth, alpha, beta, best)
+                if value <= alpha and alpha > -MATE_SCORE:
+                    alpha = max(alpha - 2 * delta, -MATE_SCORE)  # fail low: drop the floor
+                    delta *= 2
+                    continue
+                if value >= beta and beta < MATE_SCORE:
+                    beta = min(beta + 2 * delta, MATE_SCORE)     # fail high: raise the roof
+                    delta *= 2
+                    best = move  # a fail-high move is still the best guess we have
+                    continue
+                break
+
+            best = move       # depth completed inside the window - adopt its move
+            score = value
 
     except Timeout:
         pass
