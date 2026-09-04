@@ -95,7 +95,15 @@ LMR_MIN_MOVE = 3            # late-move reduction: first few moves at a node kep
 IIR_MIN_DEPTH = 7           # internal iterative reduction: fires only at least this deep
 ASPIRATION_MIN_DEPTH = 4    # full-width search up to here, a thin window after
 ASPIRATION_WINDOW = 25      # aspiration half-width in cp, doubled on each miss
-REPETITION_PENALTY = 60     # cp docked at the root for replaying into a position we've seen
+
+# cp docked at the root for replaying the move we chose last time we were asked to move in
+# this exact position. get_move builds a fresh chess.Board(fen) with no move history every
+# call, so is_repetition() inside the search can only catch a repeat invented within its own
+# lookahead - it never sees that the real game already visited this position. This penalty is
+# the only thing that does, so it has to be big: a search blind to the real history can score
+# a move that only loops as if it were a genuine, decisive try (measured gap in one real game:
+# ~360 cp - see the commit). MATE_THRESHOLD still exempts a real forced mate.
+REPETITION_PENALTY = 400
 
 # lookup tables built once at import so the search never recomputes them per node
 _LMR = [[0] * 64 for _ in range(64)]  # [depth][move index] -> reduction; log-formula shape
