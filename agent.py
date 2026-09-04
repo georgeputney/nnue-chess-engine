@@ -15,19 +15,27 @@ import chess.polyglot
 # Texel-tuned evaluation weights (tools/tune.py). The piece-square tables have material
 # folded in and are a1-first; the scalars are split midgame / endgame.
 from tables import (
-    DOUBLED_PAWN_EG,
-    DOUBLED_PAWN_MG,
     ENDGAME_TABLE,
     KING_EXPOSURE_EG,
     KING_EXPOSURE_MG,
     MIDGAME_TABLE,
     MOBILITY_WEIGHT_EG,
     MOBILITY_WEIGHT_MG,
+    PAWN_AHEAD_EG,
+    PAWN_AHEAD_MG,
     TEMPO_EG,
     TEMPO_MG,
 )
 
 popcount = chess.popcount  # aliased once; called per slider in the eval loop
+FULL_BB = (1 << 64) - 1
+
+# virtual piece type: a pawn on the far side of the board from its own king behaves
+# differently (storms, weak shelter) and scores on its own material/PST/pawn-ahead row
+# instead of PAWN's. MIDGAME_TABLE / ENDGAME_TABLE / PAWN_AHEAD_MG / PAWN_AHEAD_EG all carry
+# a row for it, indexed by this sentinel.
+# ref: https://www.chessprogramming.org/Pawn_Structure
+FAR_PAWN = 0
 
 # rough centipawn values for move ordering and delta pruning only - the evaluation itself
 # works off the tuned tables. no king entry: both sides always have one.
@@ -118,15 +126,19 @@ class Timeout(Exception):
     pass
 
 
-# Count "extra" pawns across all files: 0 for a healthy structure, +1 per doubled file,
-# +2 for a tripled one. Same routine for either colour's pawn bitboard.
-def doubled_pawns(pawns: chess.Bitboard) -> int:
-    extra = 0
-    for file_bb in chess.BB_FILES:
-        count = chess.popcount(pawns & file_bb)
-        if count > 1:
-            extra += count - 1
-    return extra
+# How many of `colour`'s pawns stand on `square`'s file, strictly ahead of it toward the far
+# rank. For a pawn this doubles as a doubled-pawn count (each pawn behind another on its file
+# counts the ones in front of it); for any other piece it is a free structural signal, e.g. a
+# rook parked behind its own pawns. The shift-and-mask is a single-file "ahead of this square"
+# mask: shifting the file-A pattern left by `square` re-bases it onto square's own file and
+# rank for white; the mirrored pattern and a right-shift do the same for black.
+# ref: https://www.chessprogramming.org/Doubled_Pawn
+def pawns_ahead(square: chess.Square, colour: chess.Color, own_pawns: chess.Bitboard) -> int:
+    if colour == chess.WHITE:
+        ahead = (0x0101_0101_0101_0100 << square) & FULL_BB
+    else:
+        ahead = 0x0080_8080_8080_8080 >> (63 - square)
+    return popcount(ahead & own_pawns)
 
 
 # Squares a queen on `square` would attack through `occupied` - used from the king's square
@@ -145,18 +157,31 @@ def slider_scope(square: chess.Square, occupied: chess.Bitboard) -> int:
 def evaluate(board: chess.Board, side: chess.Color) -> int:
     midgame = endgame = phase = 0  # white's point of view; phase kept in step with game_phase
     occupied = board.occupied
+    pawns_by_colour = {
+        chess.WHITE: board.pawns & board.occupied_co[chess.WHITE],
+        chess.BLACK: board.pawns & board.occupied_co[chess.BLACK],
+    }
 
     for colour in (chess.WHITE, chess.BLACK):
         sign = 1 if colour == chess.WHITE else -1
+        own_pawns = pawns_by_colour[colour]
+
+        king_sq = board.king(colour)
+        king_file = chess.square_file(king_sq) if king_sq is not None else 4
 
         for pt in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
             for square in chess.scan_forward(board.pieces_mask(pt, colour)):
+                # far pawn: on the opposite half of the board from its own king's file, so
+                # it scores on FAR_PAWN's row instead of PAWN's.
+                far = pt == chess.PAWN and (chess.square_file(square) ^ king_file) & 4
+                vt = FAR_PAWN if far else pt
+
                 i = square if colour == chess.WHITE else square ^ 56
 
                 # material + placement; material is folded into the piece-square tables
                 # ref: https://www.chessprogramming.org/Piece-Square_Tables
-                mg = MIDGAME_TABLE[pt][i]
-                eg = ENDGAME_TABLE[pt][i]
+                mg = MIDGAME_TABLE[vt][i]
+                eg = ENDGAME_TABLE[vt][i]
 
                 # slider mobility: more reachable squares is better
                 # ref: https://www.chessprogramming.org/Mobility
@@ -172,19 +197,18 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
                     mg += KING_EXPOSURE_MG * scope
                     eg += KING_EXPOSURE_EG * scope
 
+                # friendly pawns on this file, ahead of this piece toward the far rank - a
+                # doubled-pawn penalty for a pawn, a free per-type term for anything else
+                # ref: https://www.chessprogramming.org/Doubled_Pawn
+                stacked = pawns_ahead(square, colour, own_pawns)
+                mg += PAWN_AHEAD_MG.get(vt, 0) * stacked
+                eg += PAWN_AHEAD_EG.get(vt, 0) * stacked
+
                 midgame += sign * mg
                 endgame += sign * eg
                 phase += PHASE_WEIGHT.get(pt, 0)
 
     phase = min(phase, 24)
-
-    # doubled-pawn penalty, white minus black
-    # ref: https://www.chessprogramming.org/Doubled_Pawn
-    doubled = doubled_pawns(board.pawns & board.occupied_co[chess.WHITE]) - doubled_pawns(
-        board.pawns & board.occupied_co[chess.BLACK]
-    )
-    midgame += DOUBLED_PAWN_MG * doubled
-    endgame += DOUBLED_PAWN_EG * doubled
 
     # a small bonus for having the move
     # ref: https://www.chessprogramming.org/Tempo

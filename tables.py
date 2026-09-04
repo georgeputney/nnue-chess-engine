@@ -163,16 +163,21 @@ _MIDGAME_RAW = [MIDGAME_PAWN, MIDGAME_KNIGHT, MIDGAME_BISHOP,
 _ENDGAME_RAW = [ENDGAME_PAWN, ENDGAME_KNIGHT, ENDGAME_BISHOP,
                 ENDGAME_ROOK, ENDGAME_QUEEN, ENDGAME_KING]
 
-# [piece_type][square] -> material + placement, white's view, a1-first
-MIDGAME_TABLE: dict[chess.PieceType, list[int]] = {
+# [piece_type][square] -> material + placement, white's view, a1-first. key 0 is FAR_PAWN,
+# agent.py's virtual piece type for a pawn on the far side of the board from its own king;
+# seeded as a copy of PAWN's row (1) so it starts identical until tools/tune.py fits it
+# separately.
+MIDGAME_TABLE: dict[int, list[int]] = {
     pt: [MIDGAME_VALUE[pt - 1] + v for v in _a1(_MIDGAME_RAW[pt - 1])] for pt in range(1, 7)
 }
-ENDGAME_TABLE: dict[chess.PieceType, list[int]] = {
+MIDGAME_TABLE[0] = list(MIDGAME_TABLE[1])
+ENDGAME_TABLE: dict[int, list[int]] = {
     pt: [ENDGAME_VALUE[pt - 1] + v for v in _a1(_ENDGAME_RAW[pt - 1])] for pt in range(1, 7)
 }
+ENDGAME_TABLE[0] = list(ENDGAME_TABLE[1])
 
 # scalar terms, split midgame / endgame. these values reproduce the hand-built eval: mobility
-# flat across phases, king exposure midgame only, tempo and the doubled-pawn penalty flat.
+# flat across phases, king exposure midgame only, tempo flat.
 MOBILITY_WEIGHT_MG: dict[chess.PieceType, int] = {chess.BISHOP: 4, chess.ROOK: 2, chess.QUEEN: 1}
 MOBILITY_WEIGHT_EG: dict[chess.PieceType, int] = {chess.BISHOP: 4, chess.ROOK: 2, chess.QUEEN: 1}
 
@@ -180,5 +185,9 @@ KING_EXPOSURE_MG = -2
 KING_EXPOSURE_EG = 0
 TEMPO_MG = 10
 TEMPO_EG = 10
-DOUBLED_PAWN_MG = -12
-DOUBLED_PAWN_EG = -12
+
+# per virtual piece type (0 = far pawn, 1..6 = pawn..king): weight per friendly pawn ahead of
+# this piece on its file. only the two pawn rows start non-zero - the old flat doubled-pawn
+# penalty, -12 either phase; tools/tune.py is free to find a value for the rest.
+PAWN_AHEAD_MG: dict[int, int] = {0: -12, 1: -12, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+PAWN_AHEAD_EG: dict[int, int] = {0: -12, 1: -12, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
