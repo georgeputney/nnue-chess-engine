@@ -100,6 +100,12 @@ for _d in range(1, 64):
     for _i in range(1, 64):
         _LMR[_d][_i] = int(0.75 + math.log(_d) * math.log(_i) / 2.25)
 
+LMP_MAX_DEPTH = 6      # move-count and futility pruning only this shallow
+FUTILITY_MARGIN = 100  # cp per ply; a quiet this far below alpha won't rescue the node
+
+# LMP quiet-move cap by depth: 3 + d*d -> 4, 7, 12, 19, 28, 39 for depths 1-6
+_LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]
+
 
 # Thrown when the search hits the time cap; get_move catches it.
 class Timeout(Exception):
@@ -316,18 +322,19 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     if depth <= 0:
         return quiescence_search(board, alpha, beta, ply)
 
-    # reverse futility pruning: at a shallow non-PV node, if the static eval beats beta by
-    # more than a per-ply margin, the search almost certainly fails high - return early.
+    # static eval, shared by RFP here and futility pruning in the move loop. only at shallow
+    # depth (where they prune) and never in check (the eval would badly misjudge it).
+    shallow = depth <= LMP_MAX_DEPTH and not board.is_check()
+    static_eval = evaluate(board, board.turn) if shallow else 0
+
+    # reverse futility pruning
     # ref: https://www.chessprogramming.org/Reverse_Futility_Pruning
     if (
-        depth <= RFP_MAX_DEPTH
-        and not board.is_check()
-        and beta - alpha == 1  # non-PV
-        and abs(beta) < MATE_THRESHOLD  # not a mate bound
+        shallow
+        and beta - alpha == 1
+        and abs(beta) < MATE_THRESHOLD
+        and static_eval - RFP_MARGIN * depth >= beta
     ):
-        static_eval = evaluate(board, board.turn)
-
-        if static_eval - RFP_MARGIN * depth >= beta:
             return static_eval
 
     # null-move pruning: hand the opponent a free move and search shallow. if we still beat
@@ -364,7 +371,9 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     alpha_original = alpha  # incoming window, kept to tag the stored score below
     best = -MATE_SCORE
     best_move = moves[0]  # always have a move to store, even if none improves on -MATE_SCORE
+
     tried_quiets: list[chess.Move] = []  # quiets that didn't cut here - they take the malus
+    quiets_seen = 0                        # for late move pruning
 
     for i, move in enumerate(moves):
         # check extension: a checking move forces the reply, so search that line a ply deeper.
@@ -372,6 +381,19 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         # drives `ply` past MAX_DEPTH - the floor above is just the backstop.
         extension = 1 if board.gives_check(move) and ply + 1 < MAX_DEPTH else 0
         is_quiet = not board.is_capture(move) and not move.promotion
+
+        # shallow non-PV quiet-move pruning, once we have a real score to fall back on
+        if is_quiet:
+            if not extension and shallow and beta - alpha == 1 and best > -MATE_THRESHOLD:
+                # late move pruning: enough quiets tried without a cut, skip the rest
+                # ref: https://www.chessprogramming.org/Futility_Pruning
+                if quiets_seen >= _LMP[depth]:
+                    break
+                # futility: this quiet can't lift a position already far below alpha
+                if static_eval + FUTILITY_MARGIN * depth <= alpha:
+                    quiets_seen += 1
+                    continue
+            quiets_seen += 1
 
         board.push(move)
 
