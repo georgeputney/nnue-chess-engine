@@ -92,6 +92,12 @@ RFP_MARGIN = 90     # centipawns of allowed decline per ply; plan says 70-120, t
 LMR_MIN_DEPTH = 3   # don't reduce within a few plies of the horizon
 LMR_MIN_MOVE = 3    # the first few moves at a node are searched at full depth
 
+# internal iterative reduction: a node deep enough to be worth ordering well, with no TT
+# move to order by, is cheaper to search a ply shallower (its own search then leaves a TT
+# move for the re-visit) than to grind every move unordered.
+# ref: https://www.chessprogramming.org/Internal_Iterative_Reductions
+IIR_MIN_DEPTH = 7  # fires only in deeper searches, where losing a ply to it is cheap
+
 # reduction amount indexed [depth][move index] - the widely used log-formula shape. built
 # once at import so the search never calls math.log per node.
 # ref: https://www.chessprogramming.org/Late_Move_Reductions
@@ -321,6 +327,13 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
         return quiescence_search(board, alpha, beta, ply)
+
+    # internal iterative reduction: on a non-PV node deep enough to be worth ordering, with
+    # no TT move to order by, shave a ply rather than grind every move unordered. PV nodes
+    # keep full depth so a mate on the principal variation is not missed by an iteration.
+    # everything downstream reads the reduced depth.
+    if tt_move is None and depth >= IIR_MIN_DEPTH and beta - alpha == 1:
+        depth -= 1
 
     # static eval, shared by RFP here and futility pruning in the move loop. only at shallow
     # depth (where they prune) and never in check (the eval would badly misjudge it).
