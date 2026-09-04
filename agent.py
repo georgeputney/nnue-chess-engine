@@ -135,39 +135,40 @@ def slider_scope(square: chess.Square, occupied: chess.Bitboard) -> int:
 # Static score from `side`'s point of view, in centipawns. Each colour's terms are summed
 # from white's side and negated at the end for black. Every weight is tuned, from tables.py.
 def evaluate(board: chess.Board, side: chess.Color) -> int:
-    phase = game_phase(board)
-    midgame = endgame = 0  # white's point of view
-
+    midgame = endgame = phase = 0  # white's point of view; phase kept in step with game_phase
     occupied = board.occupied
-    for square, piece in board.piece_map().items():
-        i = square if piece.color == chess.WHITE else square ^ 56
-        pt = piece.piece_type
 
-        # material + placement; material is folded into the piece-square tables
-        # ref: https://www.chessprogramming.org/Piece-Square_Tables
-        mg = MIDGAME_TABLE[pt][i]
-        eg = ENDGAME_TABLE[pt][i]
+    for colour in (chess.WHITE, chess.BLACK):
+        sign = 1 if colour == chess.WHITE else -1
 
-        # slider mobility: more reachable squares is better
-        # ref: https://www.chessprogramming.org/Mobility
-        if pt in MOBILITY_WEIGHT_MG:
-            reach = popcount(board.attacks_mask(square))
-            mg += MOBILITY_WEIGHT_MG[pt] * reach
-            eg += MOBILITY_WEIGHT_EG[pt] * reach
+        for pt in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
+            for square in chess.scan_forward(board.pieces_mask(pt, colour)):
+                i = square if colour == chess.WHITE else square ^ 56
 
-        # king safety as a phantom queen: open lines from the king square read as danger
-        # ref: https://www.chessprogramming.org/King_Safety
-        elif pt == chess.KING:
-            scope = slider_scope(square, occupied)
-            mg += KING_EXPOSURE_MG * scope
-            eg += KING_EXPOSURE_EG * scope
+                # material + placement; material is folded into the piece-square tables
+                # ref: https://www.chessprogramming.org/Piece-Square_Tables
+                mg = MIDGAME_TABLE[pt][i]
+                eg = ENDGAME_TABLE[pt][i]
 
-        if piece.color == chess.WHITE:
-            midgame += mg
-            endgame += eg
-        else:
-            midgame -= mg
-            endgame -= eg
+                # slider mobility: more reachable squares is better
+                # ref: https://www.chessprogramming.org/Mobility
+                if pt in MOBILITY_WEIGHT_MG:
+                    reach = popcount(board.attacks_mask(square))
+                    mg += MOBILITY_WEIGHT_MG[pt] * reach
+                    eg += MOBILITY_WEIGHT_EG[pt] * reach
+
+                # king safety as a phantom queen: open lines from the king square read as danger
+                # ref: https://www.chessprogramming.org/King_Safety
+                elif pt == chess.KING:
+                    scope = slider_scope(square, occupied)
+                    mg += KING_EXPOSURE_MG * scope
+                    eg += KING_EXPOSURE_EG * scope
+
+                midgame += sign * mg
+                endgame += sign * eg
+                phase += PHASE_WEIGHT.get(pt, 0)
+
+    phase = min(phase, 24)
 
     # doubled-pawn penalty, white minus black
     # ref: https://www.chessprogramming.org/Doubled_Pawn
@@ -190,6 +191,9 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
 
 
 # How far into the endgame the position is: 24 = every piece on, 0 = only kings and pawns.
+# evaluate() computes this itself in its single pass over the board; this copy is kept for
+# tools/tune.py, which extracts eval terms independently of evaluate() and needs the phase
+# to line up. ref: https://www.chessprogramming.org/Tapered_Eval
 def game_phase(board: chess.Board) -> int:
     phase = sum(
         weight * len(board.pieces(pt, colour))
