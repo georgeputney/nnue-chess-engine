@@ -12,13 +12,16 @@ import time
 import chess
 import chess.polyglot
 
-# Texel-tuned evaluation weights (tools/tune.py). The piece-square tables have material
-# folded in and are a1-first; the scalars are split midgame / endgame.
+# Texel-tuned evaluation weights (tools/tune.py). Material and placement are two separate
+# tables, added together at lookup time; the piece-square tables are a1-first; every term is
+# split midgame / endgame.
 from tables import (
-    ENDGAME_TABLE,
+    ENDGAME_PST,
     KING_EXPOSURE_EG,
     KING_EXPOSURE_MG,
-    MIDGAME_TABLE,
+    MATERIAL_EG,
+    MATERIAL_MG,
+    MIDGAME_PST,
     MOBILITY_WEIGHT_EG,
     MOBILITY_WEIGHT_MG,
     PAWN_AHEAD_EG,
@@ -32,7 +35,7 @@ FULL_BB = (1 << 64) - 1
 
 # virtual piece type: a pawn on the far side of the board from its own king behaves
 # differently (storms, weak shelter) and scores on its own material/PST/pawn-ahead row
-# instead of PAWN's. MIDGAME_TABLE / ENDGAME_TABLE / PAWN_AHEAD_MG / PAWN_AHEAD_EG all carry
+# instead of PAWN's. MATERIAL_MG/EG, MIDGAME_PST/ENDGAME_PST and PAWN_AHEAD_MG/EG all carry
 # a row for it, indexed by this sentinel.
 # ref: https://www.chessprogramming.org/Pawn_Structure
 FAR_PAWN = 0
@@ -178,10 +181,12 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
 
                 i = square if colour == chess.WHITE else square ^ 56
 
-                # material + placement; material is folded into the piece-square tables
+                # material - one flat number per virtual piece type - plus placement, looked
+                # up per square. kept as two separate tables (not folded together) so each
+                # can be read, tuned and regularised on its own.
                 # ref: https://www.chessprogramming.org/Piece-Square_Tables
-                mg = MIDGAME_TABLE[vt][i]
-                eg = ENDGAME_TABLE[vt][i]
+                mg = MATERIAL_MG[vt] + MIDGAME_PST[vt][i]
+                eg = MATERIAL_EG[vt] + ENDGAME_PST[vt][i]
 
                 # slider mobility: more reachable squares is better
                 # ref: https://www.chessprogramming.org/Mobility

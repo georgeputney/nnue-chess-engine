@@ -163,18 +163,21 @@ _MIDGAME_RAW = [MIDGAME_PAWN, MIDGAME_KNIGHT, MIDGAME_BISHOP,
 _ENDGAME_RAW = [ENDGAME_PAWN, ENDGAME_KNIGHT, ENDGAME_BISHOP,
                 ENDGAME_ROOK, ENDGAME_QUEEN, ENDGAME_KING]
 
-# [piece_type][square] -> material + placement, white's view, a1-first. key 0 is FAR_PAWN,
-# agent.py's virtual piece type for a pawn on the far side of the board from its own king;
-# seeded as a copy of PAWN's row (1) so it starts identical until tools/tune.py fits it
-# separately.
-MIDGAME_TABLE: dict[int, list[int]] = {
-    pt: [MIDGAME_VALUE[pt - 1] + v for v in _a1(_MIDGAME_RAW[pt - 1])] for pt in range(1, 7)
-}
-MIDGAME_TABLE[0] = list(MIDGAME_TABLE[1])
-ENDGAME_TABLE: dict[int, list[int]] = {
-    pt: [ENDGAME_VALUE[pt - 1] + v for v in _a1(_ENDGAME_RAW[pt - 1])] for pt in range(1, 7)
-}
-ENDGAME_TABLE[0] = list(ENDGAME_TABLE[1])
+# material only, one flat number per virtual piece type (0 = far pawn, 1..6 = pawn..king).
+# king is 0: it is never captured, both sides always have exactly one, so its "material"
+# never contributes a white-minus-black difference. far pawn is seeded from pawn.
+MATERIAL_MG: dict[int, int] = {pt: MIDGAME_VALUE[pt - 1] for pt in range(1, 7)}
+MATERIAL_MG[0] = MATERIAL_MG[1]
+MATERIAL_EG: dict[int, int] = {pt: ENDGAME_VALUE[pt - 1] for pt in range(1, 7)}
+MATERIAL_EG[0] = MATERIAL_EG[1]
+
+# [piece_type][square] -> placement only, white's view, a1-first. key 0 is FAR_PAWN, agent.py's
+# virtual piece type for a pawn on the far side of the board from its own king; seeded as a
+# copy of PAWN's row (1) so it starts identical until tools/tune.py fits it separately.
+MIDGAME_PST: dict[int, list[int]] = {pt: _a1(_MIDGAME_RAW[pt - 1]) for pt in range(1, 7)}
+MIDGAME_PST[0] = list(MIDGAME_PST[1])
+ENDGAME_PST: dict[int, list[int]] = {pt: _a1(_ENDGAME_RAW[pt - 1]) for pt in range(1, 7)}
+ENDGAME_PST[0] = list(ENDGAME_PST[1])
 
 # scalar terms, split midgame / endgame. these values reproduce the hand-built eval: mobility
 # flat across phases, king exposure midgame only, tempo flat.
