@@ -57,80 +57,52 @@ MAX_DEPTH = 64
 # plies quiescence can add past MAX_DEPTH on a checking sequence.
 MATE_THRESHOLD = MATE_SCORE - 2 * MAX_DEPTH
 
-# nodes visited by the current search. read by tools/nodebench.py; bench_search resets it.
-NODES = 0
-
 # time budget as clock fractions: at most 1/HARD_LIMIT per move, and no new depth once
 # 1/SOFT_LIMIT of the clock has been spent. rough, worth tuning.
 HARD_LIMIT = 4
 SOFT_LIMIT = 40
+CHECK_EVERY = 1024  # poll the wall clock every this many nodes; smaller = less overshoot
 
-CHECK_EVERY = 1024  # poll the clock every this many nodes; smaller = less overshoot past DEADLINE
-DEADLINE: float | None = None  # time to stop at, or None when there is no clock
+# transposition-table shape. an entry is (zobrist key, depth, score, bound, best move) or
+# None; the bound is one of these three.
+TT_MASK = (1 << 20) - 1        # ~1M slots; power of two so `key & TT_MASK` indexes it
+UPPER, EXACT, LOWER = 0, 1, 2  # stored score is a ceiling / exact / a floor
+MAX_HISTORY = 1 << 14          # quiet-move history score saturates toward +/- this
 
-DELTA_PRUNING_MARGIN = 200  # delta-pruning cushion in centipawns; a guess, tune later
-
-TT_MASK = (1 << 20) - 1  # ~1M entries; power-of-two so `key & TT_MASK` indexes it
-UPPER, EXACT, LOWER = 0, 1, 2  # is the stored score a ceiling, exact, or a floor?
-
-# transposition table: results of positions already searched, keyed by zobrist hash.
-# index -> (zobrist key, depth searched, score, bound kind, best move), or None.
+# module state the search mutates; get_move / bench_search reset what needs it per move.
+NODES = 0                      # nodes visited this search; read by tools/nodebench.py
+DEADLINE: float | None = None  # wall-clock time to abort at, or None when off the clock
 TT: list[tuple[int, int, int, int, chess.Move] | None] = [None] * (TT_MASK + 1)
-
-# quiet-move ordering signals, both learned during the search (like the TT), both persistent
-# across iterations and moves in a game.
-MAX_HISTORY = 1 << 14  # history score saturates toward +/- this
-
-# the last two quiet moves that caused a cutoff, per remaining-depth slot
+# KILLERS[depth] holds up to two quiet moves that caused a cutoff there; HISTORY is a
+# [piece_type][to_square] cutoff tally. both persist across iterations and moves in a game.
 KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_DEPTH + 1)]
-# [piece_type][to_square] -> running tally of how often that quiet move has cut
 HISTORY: list[list[int]] = [[0] * 64 for _ in range(7)]
-
-# per-game repetition bookkeeping, keyed by zobrist hash: how many times get_move has been
-# called in a position, and the move it returned there last. AVOID is that move for the
-# current call, or None; search_root docks it. ref: REPETITION_PENALTY
+# per-game anti-repetition (see get_move / search_root), keyed by zobrist hash: how many
+# times we've been asked to move in a position, and what we chose there last. AVOID is that
+# move for the current call, or None.
 SEEN: dict[int, int] = {}
 PLAYED: dict[int, chess.Move] = {}
 AVOID: chess.Move | None = None
 
-RFP_MAX_DEPTH = 6   # only prune at shallow depth
-RFP_MARGIN = 90     # centipawns of allowed decline per ply; plan says 70-120, tune
+# search-tuning knobs; each one's reasoning and reference live at its use site in negamax /
+# get_move. LMP_MAX_DEPTH doubles as the "shallow" gate shared by RFP, LMP and futility.
+LMP_MAX_DEPTH = 6           # RFP / late-move / futility pruning only this shallow
+RFP_MARGIN = 90             # reverse futility: cp of allowed decline per ply (plan: 70-120)
+FUTILITY_MARGIN = 100       # move-loop futility: cp per ply a quiet must be within of alpha
+DELTA_PRUNING_MARGIN = 200  # quiescence delta pruning: cp cushion on a capture's value
+LMR_MIN_DEPTH = 3           # late-move reduction: none within this many plies of the horizon
+LMR_MIN_MOVE = 3            # late-move reduction: first few moves at a node kept at full depth
+IIR_MIN_DEPTH = 7           # internal iterative reduction: fires only at least this deep
+ASPIRATION_MIN_DEPTH = 4    # full-width search up to here, a thin window after
+ASPIRATION_WINDOW = 25      # aspiration half-width in cp, doubled on each miss
+REPETITION_PENALTY = 60     # cp docked at the root for replaying into a position we've seen
 
-LMR_MIN_DEPTH = 3   # don't reduce within a few plies of the horizon
-LMR_MIN_MOVE = 3    # the first few moves at a node are searched at full depth
-
-# internal iterative reduction: a node deep enough to be worth ordering well, with no TT
-# move to order by, is cheaper to search a ply shallower (its own search then leaves a TT
-# move for the re-visit) than to grind every move unordered.
-# ref: https://www.chessprogramming.org/Internal_Iterative_Reductions
-IIR_MIN_DEPTH = 7  # fires only in deeper searches, where losing a ply to it is cheap
-
-# aspiration windows: past a few plies the score barely moves between iterations, so open
-# the next one a thin band around the last score and only widen on a fail. the re-search
-# must use the widened window, not the one that just failed.
-# ref: https://www.chessprogramming.org/Aspiration_Windows
-ASPIRATION_MIN_DEPTH = 4
-ASPIRATION_WINDOW = 25  # half-width in centipawns; widened geometrically on a miss
-
-# reduction amount indexed [depth][move index] - the widely used log-formula shape. built
-# once at import so the search never calls math.log per node.
-# ref: https://www.chessprogramming.org/Late_Move_Reductions
-_LMR = [[0] * 64 for _ in range(64)]
+# lookup tables built once at import so the search never recomputes them per node
+_LMR = [[0] * 64 for _ in range(64)]  # [depth][move index] -> reduction; log-formula shape
 for _d in range(1, 64):
     for _i in range(1, 64):
         _LMR[_d][_i] = int(0.75 + math.log(_d) * math.log(_i) / 2.25)
-
-LMP_MAX_DEPTH = 6      # move-count and futility pruning only this shallow
-FUTILITY_MARGIN = 100  # cp per ply; a quiet this far below alpha won't rescue the node
-
-# LMP quiet-move cap by depth: 3 + d*d -> 4, 7, 12, 19, 28, 39 for depths 1-6
-_LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]
-
-# Anti-repetition. The search scores the first repetition as a draw (one move earlier than
-# the threefold rule, so it has time to steer), and search_root docks a root move that just
-# re-enters a position we were already asked to move in - so a dead-level game doesn't get
-# shuffled into a draw by rote. ref: https://www.chessprogramming.org/Repetitions
-REPETITION_PENALTY = 60  # centipawns, applied once at the root
+_LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]  # quiet-move cap by depth: 4, 7, 12, 19, ...
 
 
 # Thrown when the search hits the time cap; get_move catches it.
@@ -160,17 +132,8 @@ def slider_scope(square: chess.Square, occupied: chess.Bitboard) -> int:
     return popcount(attacks)
 
 
-# Static score from `side`'s point of view, in centipawns. Per piece: material + placement
-# from the piece-square tables, blended between a midgame and an endgame set by game phase
-# (kings included). Sliders add a mobility term; the king is scored as a phantom queen, so
-# open lines around it read as danger. A doubled-pawn penalty and a tempo bonus for the side
-# to move fold into both phase scores before the blend. Every weight is tuned, from tables.py.
-# ref: https://www.chessprogramming.org/Piece-Square_Tables
-# ref: https://www.chessprogramming.org/Tapered_Eval
-# ref: https://www.chessprogramming.org/Mobility
-# ref: https://www.chessprogramming.org/King_Safety
-# ref: https://www.chessprogramming.org/Tempo
-# ref: https://www.chessprogramming.org/Doubled_Pawn
+# Static score from `side`'s point of view, in centipawns. Each colour's terms are summed
+# from white's side and negated at the end for black. Every weight is tuned, from tables.py.
 def evaluate(board: chess.Board, side: chess.Color) -> int:
     phase = game_phase(board)
     midgame = endgame = 0  # white's point of view
@@ -180,14 +143,20 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
         i = square if piece.color == chess.WHITE else square ^ 56
         pt = piece.piece_type
 
+        # material + placement; material is folded into the piece-square tables
+        # ref: https://www.chessprogramming.org/Piece-Square_Tables
         mg = MIDGAME_TABLE[pt][i]
         eg = ENDGAME_TABLE[pt][i]
 
+        # slider mobility: more reachable squares is better
+        # ref: https://www.chessprogramming.org/Mobility
         if pt in MOBILITY_WEIGHT_MG:
             reach = popcount(board.attacks_mask(square))
             mg += MOBILITY_WEIGHT_MG[pt] * reach
             eg += MOBILITY_WEIGHT_EG[pt] * reach
 
+        # king safety as a phantom queen: open lines from the king square read as danger
+        # ref: https://www.chessprogramming.org/King_Safety
         elif pt == chess.KING:
             scope = slider_scope(square, occupied)
             mg += KING_EXPOSURE_MG * scope
@@ -200,17 +169,22 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
             midgame -= mg
             endgame -= eg
 
+    # doubled-pawn penalty, white minus black
+    # ref: https://www.chessprogramming.org/Doubled_Pawn
     doubled = doubled_pawns(board.pawns & board.occupied_co[chess.WHITE]) - doubled_pawns(
         board.pawns & board.occupied_co[chess.BLACK]
     )
-
     midgame += DOUBLED_PAWN_MG * doubled
     endgame += DOUBLED_PAWN_EG * doubled
 
+    # a small bonus for having the move
+    # ref: https://www.chessprogramming.org/Tempo
     tempo = 1 if board.turn == chess.WHITE else -1
     midgame += TEMPO_MG * tempo
     endgame += TEMPO_EG * tempo
 
+    # tapered blend: all midgame with every piece on the board, all endgame with none
+    # ref: https://www.chessprogramming.org/Tapered_Eval
     score = (midgame * phase + endgame * (24 - phase)) // 24
     return score if side == chess.WHITE else -score
 
@@ -288,15 +262,10 @@ def score_from_tt(score: int, ply: int) -> int:
 
 # Best score for the side to move over `depth` plies of best play. alpha/beta is the score
 # window still in contention; a result outside it cannot change the chosen move, so the
-# branch is cut. `ply` is the distance from the root - bounds check extensions and scales
-# mate scores.
+# branch is cut. `ply` is the distance from the root - it bounds check extensions and scales
+# mate scores. Each pruning step below carries its own reference.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
-# ref: https://www.chessprogramming.org/Transposition_Table
-# ref: https://www.chessprogramming.org/Principal_Variation_Search
-# ref: https://www.chessprogramming.org/Killer_Heuristic
-# ref: https://www.chessprogramming.org/History_Heuristic
-# ref: https://www.chessprogramming.org/Check_Extensions
 def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> int:
     global NODES
     NODES += 1
@@ -328,6 +297,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         return evaluate(board, board.turn)
 
     # transposition table probe: have we searched this exact position before?
+    # ref: https://www.chessprogramming.org/Transposition_Table
     key = chess.polyglot.zobrist_hash(board)
     entry = TT[key & TT_MASK]
     tt_move = None
@@ -352,24 +322,27 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     # found sooner score higher once negated back up the tree.
     if not moves:
         return -MATE_SCORE + ply if board.is_check() else 0
-    
+
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
         return quiescence_search(board, alpha, beta, ply)
 
-    # internal iterative reduction: on a non-PV node deep enough to be worth ordering, with
-    # no TT move to order by, shave a ply rather than grind every move unordered. PV nodes
-    # keep full depth so a mate on the principal variation is not missed by an iteration.
-    # everything downstream reads the reduced depth.
+    # internal iterative reduction: on a non-PV node deep enough to be worth ordering, with no
+    # TT move to order by, shave a ply rather than grind every move unordered. PV nodes keep
+    # full depth so a mate on the principal variation is not missed by an iteration. every
+    # step below reads the reduced depth.
+    # ref: https://www.chessprogramming.org/Internal_Iterative_Reductions
     if tt_move is None and depth >= IIR_MIN_DEPTH and beta - alpha == 1:
         depth -= 1
 
-    # static eval, shared by RFP here and futility pruning in the move loop. only at shallow
-    # depth (where they prune) and never in check (the eval would badly misjudge it).
+    # static eval, shared by reverse futility here and late-move / futility pruning in the
+    # move loop. `shallow` is the gate all three use: shallow enough to prune and not in
+    # check (the eval badly misjudges a position in check).
     shallow = depth <= LMP_MAX_DEPTH and not board.is_check()
     static_eval = evaluate(board, board.turn) if shallow else 0
 
-    # reverse futility pruning
+    # reverse futility pruning: so far ahead that even conceding RFP_MARGIN per remaining
+    # ply still clears beta, so assume the real search fails high too
     # ref: https://www.chessprogramming.org/Reverse_Futility_Pruning
     if (
         shallow
@@ -377,7 +350,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         and abs(beta) < MATE_THRESHOLD
         and static_eval - RFP_MARGIN * depth >= beta
     ):
-            return static_eval
+        return static_eval
 
     # null-move pruning: hand the opponent a free move and search shallow. if we still beat
     # beta after passing, the real move almost certainly cuts too - prune. guards: not in
@@ -400,6 +373,8 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
             return score  # too good even after passing
 
     # best-first ordering: TT move, then captures by MVV-LVA, then killers, then history
+    # ref: https://www.chessprogramming.org/Killer_Heuristic
+    # ref: https://www.chessprogramming.org/History_Heuristic
     moves.sort(
         key=lambda m: (
             m == tt_move,
@@ -421,37 +396,42 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         # check extension: a checking move forces the reply, so search that line a ply deeper.
         # only extend while the child stays inside the ceiling, so the extension itself never
         # drives `ply` past MAX_DEPTH - the floor above is just the backstop.
+        # ref: https://www.chessprogramming.org/Check_Extensions
         extension = 1 if board.gives_check(move) and ply + 1 < MAX_DEPTH else 0
         is_quiet = not board.is_capture(move) and not move.promotion
 
         # shallow non-PV quiet-move pruning, once we have a real score to fall back on
+        # ref: https://www.chessprogramming.org/Futility_Pruning
         if is_quiet:
             if not extension and shallow and beta - alpha == 1 and best > -MATE_THRESHOLD:
                 # late move pruning: enough quiets tried without a cut, skip the rest
-                # ref: https://www.chessprogramming.org/Futility_Pruning
                 if quiets_seen >= _LMP[depth]:
                     break
                 # futility: this quiet can't lift a position already far below alpha
                 if static_eval + FUTILITY_MARGIN * depth <= alpha:
                     quiets_seen += 1
                     continue
+                
             quiets_seen += 1
 
         board.push(move)
 
         new_depth = depth - 1 + extension  # the check extension, if any, folds in here
 
-        # first repetition = draw: score it 0 and don't search on. this fires a move before
-        # the threefold rule, so the search can still head into the draw when worse or
-        # around it when better. ref: REPETITION_PENALTY
+        # first repetition scores as a draw and the line is not searched on - a move before
+        # the threefold rule, so the search can still steer into the draw when worse or away
+        # from it when better.
+        # ref: https://www.chessprogramming.org/Repetitions
         if board.halfmove_clock >= 4 and board.is_repetition(2):
             score = 0
         elif i == 0:
-            # the move the ordering trusts most - search it at full width
+            # the move the ordering trusts most - full-window principal variation search
+            # ref: https://www.chessprogramming.org/Principal_Variation_Search
             score = -negamax(board, new_depth, -beta, -alpha, ply + 1)
         else:
-            # late move reductions: a quiet move past the first few is unlikely to be best,
-            # so probe it shallower and only pay full depth if it beats alpha anyway.
+            # later moves: probe with a reduced depth and a null window, and only pay for a
+            # wider / deeper search if the probe beats alpha.
+            # ref: https://www.chessprogramming.org/Late_Move_Reductions
             reduction = 0
             if is_quiet and extension == 0 and depth >= LMR_MIN_DEPTH and i >= LMR_MIN_MOVE:
                 reduction = min(_LMR[min(depth, 63)][min(i, 63)], new_depth - 1)
@@ -484,6 +464,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
 
                 bonus = depth * depth
                 update_history(board, move, bonus)
+            
                 for q in tried_quiets:
                     update_history(board, q, -bonus)
 
@@ -578,8 +559,10 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
 def search_root(
     board: chess.Board, depth: int, alpha: int, beta: int, prev_best: chess.Move | None
 ) -> tuple[chess.Move, int]:
+    
     moves = list(board.legal_moves)
     moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
+
     if prev_best is not None and prev_best in moves:
         moves.remove(prev_best)
         moves.insert(0, prev_best)
@@ -590,21 +573,21 @@ def search_root(
     for i, move in enumerate(moves):
         board.push(move)
         if board.halfmove_clock >= 4 and board.is_repetition(2):
-            # this move repeats a position twice over - a draw
+            # this move brings a position up for the second time - a draw (see negamax)
             score = 0
         elif i == 0:
-            # ply 1: the child is one move from the root, so a mate there is mate in 1
+            # first move: full window; children search from ply 1 so a mate there is mate-in-1
             score = -negamax(board, depth - 1, -beta, -alpha, 1)
         else:
             # scout the rest with a null window; re-search only the ones that beat alpha
             score = -negamax(board, depth - 1, -alpha - 1, -alpha, 1)
             if alpha < score < beta:
                 score = -negamax(board, depth - 1, -beta, -alpha, 1)
+
         board.pop()
 
-        # shy away from replaying the move we chose last time we were asked to move in this
-        # exact position, unless it is a real mate - so a level game isn't rubber-stamped
-        # into a repetition draw
+        # dock the move we chose here last time we were asked to move in this exact position
+        # (unless it is a real mate) so a level game isn't rubber-stamped into a repetition
         if move == AVOID and score < MATE_THRESHOLD:
             score -= REPETITION_PENALTY
 
@@ -633,8 +616,9 @@ def get_move(fen: str, time_left_ms: int) -> str:
     DEADLINE = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
     soft_cap = time_left_ms / SOFT_LIMIT / 1000
 
-    # if we've been asked to move in this exact position before, steer search_root off the
-    # move we played last time (see REPETITION_PENALTY). SEEN / PLAYED persist for the game.
+    # if we've been asked to move in this exact position before, tell search_root which move
+    # we played last time so it can shy away from it. SEEN / PLAYED persist for the game.
+    # ref: https://www.chessprogramming.org/Repetitions
     key = chess.polyglot.zobrist_hash(board)
     seen = SEEN.get(key, 0)
     SEEN[key] = seen + 1
@@ -650,23 +634,28 @@ def get_move(fen: str, time_left_ms: int) -> str:
             # aspiration: a thin band around the last score past the opening plies, full
             # width before that. widen geometrically on whichever side failed and re-search
             # with the widened window - not the one that just failed.
+            # ref: https://www.chessprogramming.org/Aspiration_Windows
             if depth <= ASPIRATION_MIN_DEPTH:
                 alpha, beta = -MATE_SCORE, MATE_SCORE
             else:
                 alpha, beta = score - ASPIRATION_WINDOW, score + ASPIRATION_WINDOW
+
             delta = ASPIRATION_WINDOW
 
             while True:
                 move, value = search_root(board, depth, alpha, beta, best)
+
                 if value <= alpha and alpha > -MATE_SCORE:
                     alpha = max(alpha - 2 * delta, -MATE_SCORE)  # fail low: drop the floor
                     delta *= 2
                     continue
+
                 if value >= beta and beta < MATE_SCORE:
                     beta = min(beta + 2 * delta, MATE_SCORE)     # fail high: raise the roof
                     delta *= 2
                     best = move  # a fail-high move is still the best guess we have
                     continue
+
                 break
 
             best = move       # depth completed inside the window - adopt its move
