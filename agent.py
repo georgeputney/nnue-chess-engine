@@ -538,23 +538,41 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
 
 
 # Root of the search: negamax's move loop, but it keeps the best move, not just the score.
-# Seeded with the first legal move so it always returns one.
-def search_root(board: chess.Board, depth: int) -> tuple[chess.Move, int]:
-    best_move = next(iter(board.legal_moves))
-    best_score = -MATE_SCORE
-
+# `prev_best` (last iteration's choice) is tried first, the rest fall back to MVV-LVA, and
+# the moves after the first are scouted with a null window and only re-searched if they beat
+# alpha - so the root prunes the same way every interior node does.
+# ref: https://www.chessprogramming.org/Principal_Variation_Search
+def search_root(
+    board: chess.Board, depth: int, alpha: int, beta: int, prev_best: chess.Move | None
+) -> tuple[chess.Move, int]:
     moves = list(board.legal_moves)
     moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
+    if prev_best is not None and prev_best in moves:
+        moves.remove(prev_best)
+        moves.insert(0, prev_best)
 
-    for move in moves:
+    best_move = moves[0]
+    best_score = -MATE_SCORE
+
+    for i, move in enumerate(moves):
         board.push(move)
-        # ply 1: the child is one move from the root, so a mate there is mate in 1
-        score = -negamax(board, depth - 1, -MATE_SCORE, MATE_SCORE, 1)
+        if i == 0:
+            # the move the ordering trusts most - full window
+            score = -negamax(board, depth - 1, -beta, -alpha, 1)
+        else:
+            # scout with a null window; re-search full only if it beats alpha
+            score = -negamax(board, depth - 1, -alpha - 1, -alpha, 1)
+            if alpha < score < beta:
+                score = -negamax(board, depth - 1, -beta, -alpha, 1)
         board.pop()
 
         if score > best_score:  # strict, so ties keep the earlier (better-ordered) move
             best_score = score
             best_move = move
+
+        alpha = max(alpha, best_score)
+        if alpha >= beta:
+            break  # fail-high: nothing else at the root can change the choice
 
     return best_move, best_score
 
@@ -579,7 +597,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
             if time.monotonic() - start >= soft_cap:
                 break
 
-            move, _ = search_root(board, depth)
+            move, _ = search_root(board, depth, -MATE_SCORE, MATE_SCORE, best)
             best = move  # depth completed, adopt its move
 
     except Timeout:
@@ -600,6 +618,6 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     for row in HISTORY:
         row[:] = [0] * 64
 
-    move, score = search_root(chess.Board(fen), depth)
+    move, score = search_root(chess.Board(fen), depth, -MATE_SCORE, MATE_SCORE, None)
 
     return move.uci(), score, NODES
