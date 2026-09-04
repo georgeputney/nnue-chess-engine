@@ -515,6 +515,19 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
     if DEADLINE is not None and NODES % CHECK_EVERY == 0 and time.monotonic() >= DEADLINE:
         raise Timeout
 
+    # threefold repetition is a draw - same guard as negamax. a check sequence that runs
+    # into the qsearch tail (every reply is searched here, not just captures) can still
+    # cycle; without this, quiescence has no way to notice and just keeps searching it.
+    if board.is_repetition(3):
+        return 0
+
+    # recursion floor, matching negamax's - the only thing that bounds a checking sequence
+    # here, since the in-check branch below searches every reply rather than spending depth.
+    if ply >= MAX_DEPTH:
+        if board.is_check() and not any(board.generate_legal_moves()):
+            return -MATE_SCORE + ply
+        return evaluate(board, board.turn)
+
     in_check = board.is_check()
     if in_check:
         # can't standing pat out of check: search every reply
