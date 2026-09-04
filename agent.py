@@ -86,6 +86,13 @@ KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_DEPTH 
 # [piece_type][to_square] -> running tally of how often that quiet move has cut
 HISTORY: list[list[int]] = [[0] * 64 for _ in range(7)]
 
+# per-game repetition bookkeeping, keyed by zobrist hash: how many times get_move has been
+# called in a position, and the move it returned there last. AVOID is that move for the
+# current call, or None; search_root docks it. ref: REPETITION_PENALTY
+SEEN: dict[int, int] = {}
+PLAYED: dict[int, chess.Move] = {}
+AVOID: chess.Move | None = None
+
 RFP_MAX_DEPTH = 6   # only prune at shallow depth
 RFP_MARGIN = 90     # centipawns of allowed decline per ply; plan says 70-120, tune
 
@@ -111,6 +118,12 @@ FUTILITY_MARGIN = 100  # cp per ply; a quiet this far below alpha won't rescue t
 
 # LMP quiet-move cap by depth: 3 + d*d -> 4, 7, 12, 19, 28, 39 for depths 1-6
 _LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]
+
+# Anti-repetition. The search scores the first repetition as a draw (one move earlier than
+# the threefold rule, so it has time to steer), and search_root docks a root move that just
+# re-enters a position we were already asked to move in - so a dead-level game doesn't get
+# shuffled into a draw by rote. ref: https://www.chessprogramming.org/Repetitions
+REPETITION_PENALTY = 60  # centipawns, applied once at the root
 
 
 # Thrown when the search hits the time cap; get_move catches it.
@@ -412,7 +425,12 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
 
         new_depth = depth - 1 + extension  # the check extension, if any, folds in here
 
-        if i == 0:
+        # first repetition = draw: score it 0 and don't search on. this fires a move before
+        # the threefold rule, so the search can still head into the draw when worse or
+        # around it when better. ref: REPETITION_PENALTY
+        if board.halfmove_clock >= 4 and board.is_repetition(2):
+            score = 0
+        elif i == 0:
             # the move the ordering trusts most - search it at full width
             score = -negamax(board, new_depth, -beta, -alpha, ply + 1)
         else:
@@ -556,7 +574,10 @@ def search_root(
 
     for i, move in enumerate(moves):
         board.push(move)
-        if i == 0:
+        if board.halfmove_clock >= 4 and board.is_repetition(2):
+            # this move repeats a position twice over - a draw
+            score = 0
+        elif i == 0:
             # the move the ordering trusts most - full window
             score = -negamax(board, depth - 1, -beta, -alpha, 1)
         else:
@@ -565,6 +586,12 @@ def search_root(
             if alpha < score < beta:
                 score = -negamax(board, depth - 1, -beta, -alpha, 1)
         board.pop()
+
+        # shy away from replaying the move we chose last time we were asked to move in this
+        # exact position, unless it is a real mate - so a level game isn't rubber-stamped
+        # into a repetition draw
+        if move == AVOID and score < MATE_THRESHOLD:
+            score -= REPETITION_PENALTY
 
         if score > best_score:  # strict, so ties keep the earlier (better-ordered) move
             best_score = score
@@ -580,7 +607,7 @@ def search_root(
 # The platform's per-move entry point. Deepens one ply at a time until the clock stops it,
 # returning the best move from the last depth that completed.
 def get_move(fen: str, time_left_ms: int) -> str:
-    global DEADLINE, NODES
+    global DEADLINE, NODES, AVOID
     NODES = 0  # per-move, so the CHECK_EVERY clock poll doesn't inherit the last move's phase
 
     board = chess.Board(fen)
@@ -590,6 +617,13 @@ def get_move(fen: str, time_left_ms: int) -> str:
     # last clock check plus move-gen and the reply; soft cap past which no new depth starts
     DEADLINE = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
     soft_cap = time_left_ms / SOFT_LIMIT / 1000
+
+    # if we've been asked to move in this exact position before, steer search_root off the
+    # move we played last time (see REPETITION_PENALTY). SEEN / PLAYED persist for the game.
+    key = chess.polyglot.zobrist_hash(board)
+    seen = SEEN.get(key, 0)
+    SEEN[key] = seen + 1
+    AVOID = PLAYED.get(key) if seen else None
 
     best = next(iter(board.legal_moves))  # fallback if depth 1 itself times out
     try:
@@ -605,6 +639,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
     finally:
         DEADLINE = None
 
+    PLAYED[key] = best
     return best.uci()
 
 
