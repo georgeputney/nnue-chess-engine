@@ -1,13 +1,14 @@
 """
 Submission entry point. The platform imports this module once per game and calls
 get_move(fen, time_left_ms) per move; module state lasts until that game ends, then resets.
-Import runs first, inside a 60 s budget, before our clock starts.
+Import runs first, inside a 90 s budget, before our clock starts.
 
 An alpha-beta search over a Texel-tuned tapered evaluation, built up in the phases in docs/plan.md.
 """
 
+import os
 import time
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 
 import chess
 import chess.polyglot
@@ -718,40 +719,34 @@ def search_root(
 
 # The platform's per-move entry point. Deepens one ply at a time until the clock stops it,
 # returning the best move from the last depth that completed.
-def get_move(fen: str, time_left_ms: int) -> str:
-    global DEADLINE, NODES, AVOID
-    NODES = 0  # per-move, so the CHECK_EVERY clock poll doesn't inherit the last move's phase
+# Iterative deepening with aspiration windows: deepens from ply 1 until DEADLINE cuts the search
+# off mid-depth (Timeout) or soft_cap elapses with no depth in flight, returning the best move/
+# score from the last depth that completed inside the window - `fallback` if none did. Pulled
+# out of get_move so _warm_up (below) can reuse the exact same driver on a position with no real
+# clock, rather than keeping a second, slightly-different copy of this loop in sync by hand.
+# `extra_stop`, if given, is checked alongside the time budget - _warm_up uses it to bail out
+# once the transposition table has grown enough, without changing get_move's own behaviour at
+# all (its calls never pass one).
+def deepen(
+    board: chess.Board,
+    start: float,
+    deadline: float,
+    soft_cap: float,
+    fallback: chess.Move,
+    extra_stop: Callable[[], bool] | None = None,
+) -> tuple[chess.Move, int]:
+    
+    global DEADLINE
+    DEADLINE = deadline
 
-    board = chess.Board(fen)
-
-    # if we've been asked to move in this exact position before, tell search_root which move
-    # we played last time so it can shy away from it. SEEN / PLAYED persist for the game.
-    # ref: https://www.chessprogramming.org/Repetitions
-    key = chess.polyglot.zobrist_hash(board)
-    seen = SEEN.get(key, 0)
-    SEEN[key] = seen + 1
-    AVOID = PLAYED.get(key) if seen else None
-
-    # critically low on time: don't search at all. the clock is only checked every CHECK_EVERY
-    # nodes, so even a single depth-1 iteration could cost more than this move has left and
-    # lose the game on time instead of the position - grab the best-looking move and return.
-    if time_left_ms < PANIC_TIME_MS:
-        best = panic_move(board)
-        PLAYED[key] = best
-        return best.uci()
-
-    start = time.monotonic()
-
-    # hard deadline to abort at - the 50 ms is slack for the node batch that runs past the
-    # last clock check plus move-gen and the reply; soft cap past which no new depth starts
-    DEADLINE = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
-    soft_cap = time_left_ms / SOFT_LIMIT / 1000
-
-    best = next(iter(board.legal_moves))  # fallback if depth 1 itself times out
+    best = fallback
     score = 0
+
     try:
         for depth in range(1, MAX_DEPTH):
-            if depth > 1 and time.monotonic() - start >= soft_cap:
+            out_of_time = time.monotonic() - start >= soft_cap
+            
+            if depth > 1 and (out_of_time or (extra_stop and extra_stop())):
                 break
 
             # aspiration: a thin band around the last score past the opening plies, full
@@ -794,6 +789,41 @@ def get_move(fen: str, time_left_ms: int) -> str:
     finally:
         DEADLINE = None
 
+    return best, score
+
+
+def get_move(fen: str, time_left_ms: int) -> str:
+    global NODES, AVOID
+    NODES = 0  # per-move, so the CHECK_EVERY clock poll doesn't inherit the last move's phase
+
+    board = chess.Board(fen)
+
+    # if we've been asked to move in this exact position before, tell search_root which move
+    # we played last time so it can shy away from it. SEEN / PLAYED persist for the game.
+    # ref: https://www.chessprogramming.org/Repetitions
+    key = chess.polyglot.zobrist_hash(board)
+    seen = SEEN.get(key, 0)
+    SEEN[key] = seen + 1
+    AVOID = PLAYED.get(key) if seen else None
+
+    # critically low on time: don't search at all. the clock is only checked every CHECK_EVERY
+    # nodes, so even a single depth-1 iteration could cost more than this move has left and
+    # lose the game on time instead of the position - grab the best-looking move and return.
+    if time_left_ms < PANIC_TIME_MS:
+        best = panic_move(board)
+        PLAYED[key] = best
+        return best.uci()
+
+    start = time.monotonic()
+
+    # hard deadline to abort at - the 50 ms is slack for the node batch that runs past the
+    # last clock check plus move-gen and the reply; soft cap past which no new depth starts
+    deadline = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
+    soft_cap = time_left_ms / SOFT_LIMIT / 1000
+    fallback = next(iter(board.legal_moves))  # in case depth 1 itself times out
+
+    best, _score = deepen(board, start, deadline, soft_cap, fallback)
+
     PLAYED[key] = best
 
     # the TT persists all game as a plain dict now, with nothing bounding its size the way
@@ -802,6 +832,45 @@ def get_move(fen: str, time_left_ms: int) -> str:
         TT.clear()
 
     return best.uci()
+
+
+# Free head start on the position space most openings live near, spent during the platform's
+# init budget rather than the game clock: the harness (harness/runner.py mirrors this) imports
+# agent.py strictly before it ever tells us the fen - "there is no other input" - so this can't
+# target the real opening, and rated games start from curated, unpublished positions anyway. But
+# TT/KILLERS/HISTORY are already persistent, already read by the real search regardless of which
+# position it's asked about, so whatever this reaches before the clock starts is free.
+#
+# WARM_UP_BUDGET_S is well inside the platform's 90 s init budget (see AGENTS.md) - the
+# difference is slack for interpreter/python-chess import and for the platform's own overhead
+# around the subprocess, which the 90 s is measured across, not just the time inside this file.
+# Overridable via AGENT_WARM_UP_S: every local verification tool spawns a fresh process per
+# game (harness/sandbox.py, mirroring the platform), so a real 70 s here would add that much to
+# every single game - tools/bench.py and tools/nodebench.py default it to 0 for exactly that
+# reason. Reading an env var isn't a network or filesystem access, so it's fine under the
+# contract; the platform itself never sets this, so a real game always gets the full budget.
+WARM_UP_BUDGET_S = float(os.environ.get("AGENT_WARM_UP_S", "70.0"))
+WARM_UP_TT_CAP = TT_MAX_ENTRIES // 2  # get_move's own TT_MAX_ENTRIES clears the *whole* table
+# the moment total size crosses that line - stop warm-up earlier so a fast first real move
+# doesn't immediately wipe everything this just built.
+
+
+def _warm_up() -> None:
+    if WARM_UP_BUDGET_S <= 0:  # AGENT_WARM_UP_S=0: skip entirely, not even a depth-1 search -
+        return                 # every local verification tool spawns a process per game
+    start = time.monotonic()
+    board = chess.Board()
+    deepen(
+        board,
+        start,
+        start + WARM_UP_BUDGET_S,
+        WARM_UP_BUDGET_S,
+        next(iter(board.legal_moves)),
+        extra_stop=lambda: len(TT) >= WARM_UP_TT_CAP,
+    )
+
+
+_warm_up()
 
 
 # tools/nodebench.py hook, not used in games: fixed-depth search returning (move, score, nodes).

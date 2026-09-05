@@ -3,6 +3,7 @@
 import argparse
 import importlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# this imports agent.py directly, in-process - off by default so every run doesn't pay the
+# opening-search warm-up cost agent.py's own import now does. setdefault, not a flat assignment:
+# an explicit AGENT_WARM_UP_S in the environment still wins.
+os.environ.setdefault("AGENT_WARM_UP_S", "0")
 
 # one measured position: fen, the move the search picked, its score, and the node count
 Row = dict[str, object]

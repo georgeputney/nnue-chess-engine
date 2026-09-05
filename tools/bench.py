@@ -12,6 +12,13 @@ from pathlib import Path
 # run from anywhere: put the repo root on the path so `import harness` resolves
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# every game here spawns a fresh agent process (harness/sandbox.py, mirroring the platform), so
+# agent.py's own opening-search warm-up would run again and again rather than the once-per-game
+# it's meant for - off by default for exactly that reason. setdefault, not a flat assignment: an
+# explicit AGENT_WARM_UP_S in the environment (someone deliberately measuring warm-up itself)
+# still wins.
+os.environ.setdefault("AGENT_WARM_UP_S", "0")
+
 from harness.referee import FAILED_TERMINATIONS, play_match
 from harness.sandbox import local
 
