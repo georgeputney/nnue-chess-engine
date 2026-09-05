@@ -618,6 +618,25 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
             return -MATE_SCORE + ply
         return evaluate(board, board.turn)
 
+    # transposition table probe: shared with negamax, so a capture sequence reached by two
+    # move orders (or a position negamax already resolved before handing off here) is priced
+    # once. stored at depth 0 below, so any negamax entry (depth >= 1) is trusted here too.
+    # ref: https://www.chessprogramming.org/Transposition_Table
+    key = board._transposition_key()
+    entry = TT.get(key)
+    tt_move = None
+
+    if entry is not None:
+        _, tt_score, tt_flag, tt_move = entry
+        tt_score = score_from_tt(tt_score, ply)
+
+        if tt_flag == EXACT:
+            return tt_score
+        if tt_flag == LOWER and tt_score >= beta:
+            return tt_score
+        if tt_flag == UPPER and tt_score <= alpha:
+            return tt_score
+
     in_check = board.is_check()
     if in_check:
         # can't standing pat out of check: search every reply
@@ -641,7 +660,10 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
         moves = list(board.generate_legal_captures())
         moves += board.generate_legal_moves(board.pawns, back_rank & ~board.occupied)
 
-    moves.sort(key=lambda m: move_ordering_score(board, m), reverse=True)
+    moves.sort(key=lambda m: (m == tt_move, move_ordering_score(board, m)), reverse=True)
+
+    alpha_original = alpha
+    best_move: chess.Move | None = None
 
     for move in moves:
         # delta pruning: if winning this piece plus a margin still falls short of alpha,
@@ -660,9 +682,15 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
         score = -quiescence_search(board, -beta, -alpha, ply + 1)
         board.pop()
 
-        alpha = max(alpha, score)
+        if score > alpha:
+            alpha = score
+            best_move = move
         if alpha >= beta:
             break
+
+    # same bookkeeping as negamax's store, at a flat depth 0 - qsearch has no depth of its own
+    flag = LOWER if alpha >= beta else (EXACT if alpha > alpha_original else UPPER)
+    TT[key] = (0, score_to_tt(alpha, ply), flag, best_move or chess.Move.null())
 
     return alpha
 
