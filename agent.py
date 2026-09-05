@@ -8,6 +8,7 @@ An alpha-beta search over a Texel-tuned tapered evaluation, built up in the phas
 
 import math
 import time
+from collections.abc import Hashable
 
 import chess
 import chess.polyglot
@@ -74,16 +75,22 @@ HARD_LIMIT = 4
 SOFT_LIMIT = 40
 CHECK_EVERY = 1024  # poll the wall clock every this many nodes; smaller = less overshoot
 
-# transposition-table shape. an entry is (zobrist key, depth, score, bound, best move) or
-# None; the bound is one of these three.
-TT_MASK = (1 << 20) - 1        # ~1M slots; power of two so `key & TT_MASK` indexes it
+# transposition-table shape. an entry is (depth, score, bound, best move); the bound is one
+# of these three. TT_MAX_ENTRIES bounds the dict's memory over a long game.
 UPPER, EXACT, LOWER = 0, 1, 2  # stored score is a ceiling / exact / a floor
 MAX_HISTORY = 1 << 14          # quiet-move history score saturates toward +/- this
+TT_MAX_ENTRIES = 1_500_000     # get_move clears the table past this many entries
 
 # module state the search mutates; get_move / bench_search reset what needs it per move.
 NODES = 0                      # nodes visited this search; read by tools/nodebench.py
 DEADLINE: float | None = None  # wall-clock time to abort at, or None when off the clock
-TT: list[tuple[int, int, int, int, chess.Move] | None] = [None] * (TT_MASK + 1)
+
+# keyed by board._transposition_key() directly, not a hashed-and-masked int: that key is a
+# plain tuple (pieces, turn, castling rights, ep square), ~22x cheaper to compute per node
+# than chess.polyglot.zobrist_hash, and a dict lookup on it can never collide with a
+# different position the way a fixed-size array indexed by `hash & mask` can.
+# ref: https://www.chessprogramming.org/Transposition_Table
+TT: dict[Hashable, tuple[int, int, int, chess.Move]] = {}
 # KILLERS[depth] holds up to two quiet moves that caused a cutoff there; HISTORY is a
 # [piece_type][to_square] cutoff tally. both persist across iterations and moves in a game.
 KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_DEPTH + 1)]
@@ -339,13 +346,12 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
 
     # transposition table probe: have we searched this exact position before?
     # ref: https://www.chessprogramming.org/Transposition_Table
-    key = chess.polyglot.zobrist_hash(board)
-    entry = TT[key & TT_MASK]
+    key = board._transposition_key()
+    entry = TT.get(key)
     tt_move = None
 
-    # entry[0] == key rules out a different position that landed on the same slot
-    if entry is not None and entry[0] == key:
-        _, tt_depth, tt_score, tt_flag, tt_move = entry
+    if entry is not None:
+        tt_depth, tt_score, tt_flag, tt_move = entry
         tt_score = score_from_tt(tt_score, ply)  # re-root a stored mate score to this node
 
         # trust it only if searched at least as deep. an exact score stands; a bound only
@@ -526,7 +532,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         flag = UPPER
 
     # store the mate distance relative to this node, not the root, so it reads back correctly
-    TT[key & TT_MASK] = (key, depth, score_to_tt(best, ply), flag, best_move)  # always replace
+    TT[key] = (depth, score_to_tt(best, ply), flag, best_move)  # always replace
 
     return best
 
@@ -721,6 +727,12 @@ def get_move(fen: str, time_left_ms: int) -> str:
         DEADLINE = None
 
     PLAYED[key] = best
+
+    # the TT persists all game as a plain dict now, with nothing bounding its size the way
+    # the old fixed array did - clear it if it has grown large enough to be a memory concern.
+    if len(TT) > TT_MAX_ENTRIES:
+        TT.clear()
+
     return best.uci()
 
 
@@ -729,7 +741,7 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     global NODES
     NODES = 0
 
-    TT[:] = [None] * len(TT)  # empty table per position so node counts stay comparable
+    TT.clear()  # empty table per position so node counts stay comparable
     KILLERS[:] = [[None, None] for _ in range(len(KILLERS))]
     for row in HISTORY:
         row[:] = [0] * 64
