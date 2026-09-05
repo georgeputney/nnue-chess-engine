@@ -91,9 +91,11 @@ DEADLINE: float | None = None  # wall-clock time to abort at, or None when off t
 # ref: https://www.chessprogramming.org/Transposition_Table
 TT: dict[Hashable, tuple[int, int, int, chess.Move]] = {}
 # KILLERS[depth] holds up to two quiet moves that caused a cutoff there; HISTORY is a
-# [piece_type][to_square] cutoff tally. both persist across iterations and moves in a game.
+# [side to move][piece_type][to_square] cutoff tally - a quiet that's good for white on a
+# square says nothing about the same piece landing there for black, so each side keeps its
+# own table. both persist across iterations and moves in a game.
 KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_DEPTH + 1)]
-HISTORY: list[list[int]] = [[0] * 64 for _ in range(7)]
+HISTORY: list[list[list[int]]] = [[[0] * 64 for _ in range(7)] for _ in range(2)]
 # per-game anti-repetition (see get_move / search_root), keyed by zobrist hash: how many
 # times we've been asked to move in a position, and what we chose there last. AVOID is that
 # move for the current call, or None.
@@ -249,6 +251,14 @@ def game_phase(board: chess.Board) -> int:
     return min(phase, 24)
 
 
+# A quiet move's cutoff tally for the side about to play it, or 0 for a move whose from-square
+# is somehow empty (never true in a real search - just keeps this total).
+def history_score(board: chess.Board, move: chess.Move) -> int:
+    piece = board.piece_at(move.from_square)
+
+    return HISTORY[board.turn][piece.piece_type][move.to_square] if piece else 0
+
+
 # Adjust a quiet move's history score: positive `bonus` when it caused a cutoff, negative
 # when it was tried and did not. The gravity term shrinks the effect as the score nears the
 # cap, so entries saturate instead of running away.
@@ -258,8 +268,9 @@ def update_history(board: chess.Board, move: chess.Move, bonus: int) -> None:
     if piece is None:
         return
 
-    h = HISTORY[piece.piece_type][move.to_square]
-    HISTORY[piece.piece_type][move.to_square] = h + bonus - h * abs(bonus) // MAX_HISTORY
+    row = HISTORY[board.turn][piece.piece_type]
+    h = row[move.to_square]
+    row[move.to_square] = h + bonus - h * abs(bonus) // MAX_HISTORY
 
 
 # Ordering score so the likely-best moves are tried first: captures before quiet moves, and
@@ -298,8 +309,8 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
 def lmr_key(board: chess.Board, move: chess.Move, is_quiet: bool) -> int:
     if not is_quiet:
         return LMR_CAPTURE_FLOOR + move_ordering_score(board, move)
-    piece = board.piece_at(move.from_square)
-    return HISTORY[piece.piece_type][move.to_square] if piece else 0
+    
+    return history_score(board, move)
 
 
 # A mate score carries its distance from the root as MATE_SCORE - plies, so a faster mate
@@ -451,7 +462,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
             m == tt_move,
             move_ordering_score(board, m),
             m in KILLERS[depth],
-            HISTORY[p.piece_type][m.to_square] if (p := board.piece_at(m.from_square)) else 0,
+            history_score(board, m),
         ),
         reverse=True,
     )
@@ -777,8 +788,10 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
 
     TT.clear()  # empty table per position so node counts stay comparable
     KILLERS[:] = [[None, None] for _ in range(len(KILLERS))]
-    for row in HISTORY:
-        row[:] = [0] * 64
+    
+    for side in HISTORY:
+        for row in side:
+            row[:] = [0] * 64
 
     move, score = search_root(chess.Board(fen), depth, -MATE_SCORE, MATE_SCORE, None)
 
