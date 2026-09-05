@@ -73,6 +73,7 @@ MATE_THRESHOLD = MATE_SCORE - 2 * MAX_DEPTH
 HARD_LIMIT = 4
 SOFT_LIMIT = 40
 CHECK_EVERY = 1024  # poll the wall clock every this many nodes; smaller = less overshoot
+PANIC_TIME_MS = 300  # below this much left, skip the search rather than risk a clock loss
 
 # transposition-table shape. an entry is (depth, score, bound, best move); the bound is one
 # of these three. TT_MAX_ENTRIES bounds the dict's memory over a long game.
@@ -298,6 +299,14 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
         score += PIECE_VALUE[move.promotion] - PIECE_VALUE[chess.PAWN]
 
     return score
+
+
+# Emergency move for get_move when there isn't time to search at all: the best-looking capture
+# or promotion by the same ordering the real search uses, or - since every quiet move scores 0
+# and max() then just keeps the first one it sees - whatever legal move comes first if there is
+# no capture. No search, no board mutation: safe to call with next to no time left.
+def panic_move(board: chess.Board) -> chess.Move:
+    return max(board.legal_moves, key=lambda m: move_ordering_score(board, m))
 
 
 # How much negamax's late-move reduction should trust a move: a quiet's key is its history
@@ -714,12 +723,6 @@ def get_move(fen: str, time_left_ms: int) -> str:
     NODES = 0  # per-move, so the CHECK_EVERY clock poll doesn't inherit the last move's phase
 
     board = chess.Board(fen)
-    start = time.monotonic()
-
-    # hard deadline to abort at - the 50 ms is slack for the node batch that runs past the
-    # last clock check plus move-gen and the reply; soft cap past which no new depth starts
-    DEADLINE = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
-    soft_cap = time_left_ms / SOFT_LIMIT / 1000
 
     # if we've been asked to move in this exact position before, tell search_root which move
     # we played last time so it can shy away from it. SEEN / PLAYED persist for the game.
@@ -728,6 +731,21 @@ def get_move(fen: str, time_left_ms: int) -> str:
     seen = SEEN.get(key, 0)
     SEEN[key] = seen + 1
     AVOID = PLAYED.get(key) if seen else None
+
+    # critically low on time: don't search at all. the clock is only checked every CHECK_EVERY
+    # nodes, so even a single depth-1 iteration could cost more than this move has left and
+    # lose the game on time instead of the position - grab the best-looking move and return.
+    if time_left_ms < PANIC_TIME_MS:
+        best = panic_move(board)
+        PLAYED[key] = best
+        return best.uci()
+
+    start = time.monotonic()
+
+    # hard deadline to abort at - the 50 ms is slack for the node batch that runs past the
+    # last clock check plus move-gen and the reply; soft cap past which no new depth starts
+    DEADLINE = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
+    soft_cap = time_left_ms / SOFT_LIMIT / 1000
 
     best = next(iter(board.legal_moves))  # fallback if depth 1 itself times out
     score = 0
@@ -768,6 +786,11 @@ def get_move(fen: str, time_left_ms: int) -> str:
 
     except Timeout:
         pass
+    except Exception as exc:
+        # a bug anywhere in the search must not cost the game the way an uncaught crash would
+        # (see the contract) - keep whatever depth already completed, or the depth-1 fallback
+        # if none did, and move on. logged so it still shows up in the validation log.
+        print(f"agent: search crashed, falling back: {exc!r}")
     finally:
         DEADLINE = None
 
