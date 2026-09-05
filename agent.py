@@ -6,7 +6,6 @@ Import runs first, inside a 60 s budget, before our clock starts.
 An alpha-beta search over a Texel-tuned tapered evaluation, built up in the phases in docs/plan.md.
 """
 
-import math
 import time
 from collections.abc import Hashable
 
@@ -109,7 +108,11 @@ RFP_MARGIN = 90             # reverse futility: cp of allowed decline per ply (p
 FUTILITY_MARGIN = 100       # move-loop futility: cp per ply a quiet must be within of alpha
 DELTA_PRUNING_MARGIN = 200  # quiescence delta pruning: cp cushion on a capture's value
 LMR_MIN_DEPTH = 3           # late-move reduction: none within this many plies of the horizon
-LMR_MIN_MOVE = 3            # late-move reduction: first few moves at a node kept at full depth
+LMR_MOVE_WEIGHT = 100       # late-move reduction: pull per move index, thousandths of a ply
+LMR_DEPTH_WEIGHT = 150      # late-move reduction: pull per remaining depth, thousandths of a ply
+LMR_SCALE = 1000            # late-move reduction: divisor for the two weights above
+LMR_HISTORY_SCALE = MAX_HISTORY // 4  # late-move reduction: history's pull, capped near +/-4 ply
+LMR_CAPTURE_FLOOR = MAX_HISTORY * 2   # late-move reduction: keeps a capture/promotion above history
 IIR_MIN_DEPTH = 7           # internal iterative reduction: fires only at least this deep
 ASPIRATION_MIN_DEPTH = 4    # full-width search up to here, a thin window after
 ASPIRATION_WINDOW = 25      # aspiration half-width in cp, doubled on each miss
@@ -123,11 +126,7 @@ ASPIRATION_WINDOW = 25      # aspiration half-width in cp, doubled on each miss
 # ~360 cp - see the commit). MATE_THRESHOLD still exempts a real forced mate.
 REPETITION_PENALTY = 400
 
-# lookup tables built once at import so the search never recomputes them per node
-_LMR = [[0] * 64 for _ in range(64)]  # [depth][move index] -> reduction; log-formula shape
-for _d in range(1, 64):
-    for _i in range(1, 64):
-        _LMR[_d][_i] = int(0.75 + math.log(_d) * math.log(_i) / 2.25)
+# lookup table built once at import so the search never recomputes it per node
 _LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]  # quiet-move cap by depth: 4, 7, 12, 19, ...
 
 
@@ -285,6 +284,19 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
         score += PIECE_VALUE[move.promotion] - PIECE_VALUE[chess.PAWN]
 
     return score
+
+
+# How much negamax's late-move reduction should trust a move: a quiet's key is its history
+# score (can be negative - a quiet that keeps failing low pulls its own reduction deeper), and
+# a capture or promotion's key is its ordering score pushed above history's ceiling. That floor
+# guarantees a real capture's key always dwarfs even a maxed-out history entry, so the formula
+# in negamax reduces it back to nothing - the same "don't reduce captures" outcome as gating on
+# is_quiet, without needing the gate.
+def lmr_key(board: chess.Board, move: chess.Move, is_quiet: bool) -> int:
+    if not is_quiet:
+        return LMR_CAPTURE_FLOOR + move_ordering_score(board, move)
+    piece = board.piece_at(move.from_square)
+    return HISTORY[piece.piece_type][move.to_square] if piece else 0
 
 
 # A mate score carries its distance from the root as MATE_SCORE - plies, so a faster mate
@@ -447,6 +459,11 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         extension = 1 if board.gives_check(move) and ply + 1 < MAX_DEPTH else 0
         is_quiet = not board.is_capture(move) and not move.promotion
 
+        # late-move reduction trust score, read below - has to be taken before board.push(move)
+        # moves the piece being scored. move 0 always gets the full-window PVS search below and
+        # never reaches the reduction, so it never needs one.
+        lmr_score = lmr_key(board, move, is_quiet) if i else 0
+
         # shallow non-PV quiet-move pruning, once we have a real score to fall back on
         # ref: https://www.chessprogramming.org/Futility_Pruning
         if is_quiet:
@@ -477,11 +494,16 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
             score = -negamax(board, new_depth, -beta, -alpha, ply + 1)
         else:
             # later moves: probe with a reduced depth and a null window, and only pay for a
-            # wider / deeper search if the probe beats alpha.
+            # wider / deeper search if the probe beats alpha. almost every move here gets some
+            # reduction - it grows with the move's index and the remaining depth, and eases off
+            # for a move with a good trust score (lmr_key); a real capture's score is built to
+            # cancel the reduction back to zero rather than being gated out separately.
             # ref: https://www.chessprogramming.org/Late_Move_Reductions
             reduction = 0
-            if is_quiet and extension == 0 and depth >= LMR_MIN_DEPTH and i >= LMR_MIN_MOVE:
-                reduction = min(_LMR[min(depth, 63)][min(i, 63)], new_depth - 1)
+            if extension == 0 and depth >= LMR_MIN_DEPTH:
+                pull = i * LMR_MOVE_WEIGHT + depth * LMR_DEPTH_WEIGHT
+                raw = pull // LMR_SCALE - lmr_score // LMR_HISTORY_SCALE
+                reduction = min(max(raw, 0), new_depth - 1)
 
             # reduced, null window: is this move even worth a closer look?
             score = -negamax(board, new_depth - reduction, -alpha - 1, -alpha, ply + 1)
