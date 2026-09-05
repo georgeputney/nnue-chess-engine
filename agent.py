@@ -107,6 +107,9 @@ LMP_MAX_DEPTH = 6           # RFP / late-move / futility pruning only this shall
 RFP_MARGIN = 90             # reverse futility: cp of allowed decline per ply (plan: 70-120)
 FUTILITY_MARGIN = 100       # move-loop futility: cp per ply a quiet must be within of alpha
 DELTA_PRUNING_MARGIN = 200  # quiescence delta pruning: cp cushion on a capture's value
+NULL_MOVE_MIN_DEPTH = 3     # null-move pruning: none within this many plies of the horizon
+NULL_MOVE_DEPTH_WEIGHT = 100  # null-move pruning: depth's pull on the probe's reduced depth
+NULL_MOVE_SCALE = 200         # null-move pruning: divisor for the weight above and the margin
 LMR_MIN_DEPTH = 3           # late-move reduction: none within this many plies of the horizon
 LMR_MOVE_WEIGHT = 100       # late-move reduction: pull per move index, thousandths of a ply
 LMR_DEPTH_WEIGHT = 150      # late-move reduction: pull per remaining depth, thousandths of a ply
@@ -394,11 +397,13 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     if tt_move is None and depth >= IIR_MIN_DEPTH and beta - alpha == 1:
         depth -= 1
 
-    # static eval, shared by reverse futility here and late-move / futility pruning in the
-    # move loop. `shallow` is the gate all three use: shallow enough to prune and not in
-    # check (the eval badly misjudges a position in check).
-    shallow = depth <= LMP_MAX_DEPTH and not board.is_check()
-    static_eval = evaluate(board, board.turn) if shallow else 0
+    # static eval, shared by reverse futility and null-move here and late-move / futility
+    # pruning in the move loop. computed whenever not in check - the eval badly misjudges a
+    # position in check - regardless of depth, since null-move pruning below needs it past
+    # the shallow cutoff RFP and futility stop at.
+    in_check = board.is_check()
+    shallow = depth <= LMP_MAX_DEPTH and not in_check
+    static_eval = evaluate(board, board.turn) if not in_check else 0
 
     # reverse futility pruning: so far ahead that even conceding RFP_MARGIN per remaining
     # ply still clears beta, so assume the real search fails high too
@@ -411,21 +416,28 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     ):
         return static_eval
 
-    # null-move pruning: hand the opponent a free move and search shallow. if we still beat
-    # beta after passing, the real move almost certainly cuts too - prune. guards: not in
-    # check, non-PV (zero window), depth to spare, and non-pawn material for the side to move
-    # (in a pawn ending, being forced to move often helps the opponent - zugzwang - so the
-    # "passing only hurts me" assumption breaks).
+    # null-move pruning: hand the opponent a free move and search shallow - if the position
+    # already looks at least as good as beta, the free move is worth trusting, and if it
+    # still clears beta after passing a whole turn the real move almost certainly cuts too.
+    # guards: not in check, non-PV (zero window), a real edge to spend, depth to spare, and
+    # non-pawn material for the side to move (in a pawn ending, being forced to move often
+    # helps the opponent - zugzwang - so the "passing only hurts me" assumption breaks).
     # ref: https://www.chessprogramming.org/Null_Move_Pruning
-    reduction = 2 + depth // 6  # deeper -> cut more
     if (
-        not board.is_check()
+        not in_check
         and beta - alpha == 1  # zero window = a non-PV node
-        and depth >= 3
+        and depth >= NULL_MOVE_MIN_DEPTH
+        and static_eval >= beta
         and board.occupied_co[board.turn] & ~board.pawns & ~board.kings  # a piece to lose
     ):
+        # reduce harder the deeper the search and the more static already clears beta by -
+        # the bigger that margin, the more the free-move probe can be trusted to have found
+        # the same thing the real move would, so it can search less to prove it.
+        margin = static_eval - beta
+        reduced_depth = max((depth * NULL_MOVE_DEPTH_WEIGHT - margin) // NULL_MOVE_SCALE - 1, 0)
+
         board.push(chess.Move.null())  # skip our turn
-        score = -negamax(board, depth - 1 - reduction, -beta, -beta + 1, ply + 1)
+        score = -negamax(board, reduced_depth, -beta, -beta + 1, ply + 1)
         board.pop()
 
         if score >= beta:
