@@ -43,13 +43,13 @@ FENS: list[str] = [
 ]
 
 
-# searches every FEN to `depth` via agent.bench_search, printing nodes / time / move / score
+# searches every FEN to `depth` via <module>.bench_search, printing nodes / time / move / score
 # per position and a nps total. returns the rows for a snapshot or a compare
-def run(depth: int) -> list[Row]:
-    agent = importlib.import_module("agent")
+def run(depth: int, module: str = "agent") -> list[Row]:
+    agent = importlib.import_module(module)
     if not hasattr(agent, "bench_search"):
         raise SystemExit(
-            "agent.bench_search(fen, depth) -> (uci, score, nodes) is not defined yet. "
+            f"{module}.bench_search(fen, depth) -> (uci, score, nodes) is not defined yet. "
             "add it once there is a search (docs/plan.md phase 2)."
         )
 
@@ -107,11 +107,12 @@ def compare(rows: list[Row], baseline: list[Row]) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--module", default="agent", help="engine module with bench_search, e.g. nnue.agent")
     parser.add_argument("--baseline", type=Path, help="snapshot to write, or read with --check")
     parser.add_argument("--check", action="store_true", help="compare this run against --baseline")
     args = parser.parse_args()
 
-    rows = run(args.depth)
+    rows = run(args.depth, args.module)
 
     if args.baseline and args.check:
         baseline = json.loads(args.baseline.read_text())
