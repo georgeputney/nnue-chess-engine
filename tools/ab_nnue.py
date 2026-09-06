@@ -41,6 +41,8 @@ def reset_engine(engine: object) -> None:
     engine.STATE.history[:] = 0
     engine.STATE.killers[:] = engine.NO_MOVE
     engine.STATE.avoid = engine.NO_MOVE
+    if hasattr(engine.STATE, "tt_eval"):  # nnue engine caches the static eval in the TT
+        engine.STATE.tt_eval[:] = engine.NO_EVAL
     engine.SEEN.clear()
     engine.PLAYED.clear()
 

@@ -162,9 +162,21 @@ CONTEMPT = 30             # cp a draw is worth to us, negated: the search plays 
 LMP = np.array([3 + d * d for d in range(LMP_MAX_DEPTH + 1)], dtype=np.int64)  # quiet cap by depth
 NO_MOVE = -1
 
+# sentinel in the TT's static-eval slot for "not computed here". Out of band: real evals sit
+# near +/- a few thousand cp, mate scores at +/- MATE_SCORE (1e6).
+NO_EVAL = 1 << 30
+
+# kill switch for the TT static-eval cache. On (1) the search reuses a TT key match's stored
+# NNUE eval instead of recomputing; evaluate is pure in (acc, side) so this is exact - move,
+# score and node count are identical to the recompute path, only wall time drops. Kept as a
+# constant so tools/nodebench.py can prove the equivalence by flipping it.
+EVAL_CACHE = 1
+
 # The static evaluation is the NNUE forward pass over the Board's accumulator - see
 # nnue/accumulator.py (evaluate below is a one-line wrapper). None of the linear eval's tuned
-# tables, phase blend, or hand-built pawn masks survive the switch.
+# tables, phase blend, or hand-built pawn masks survive the switch. The NNUE forward is heavier
+# than the old linear eval, so its result is cached in the TT (tt_eval) and reused whenever the
+# search revisits a position - evaluate is pure in (acc, side), so a cache hit is exact.
 
 # per-game anti-repetition, keyed by zobrist hash: how many times we have been asked to move in
 # a position, and what we chose there last (reference.py keeps SEEN / PLAYED the same way).
@@ -178,6 +190,7 @@ STATE_SPEC = [
     ("tt_score", nb.int64[:]),
     ("tt_depth", nb.int64[:]),        # -1 = empty slot
     ("tt_flag", nb.int64[:]),
+    ("tt_eval", nb.int64[:]),         # cached NNUE static eval for this slot's position, or NO_EVAL
     ("history", nb.int64[:, :, :]),   # [side][bitboard piece id][to-square] cutoff tally
     ("killers", nb.int64[:, :]),      # [depth][0..1] quiet move that cut there, or NO_MOVE
     ("path", nb.uint64[:]),           # node hash per ply, for repetition detection
@@ -203,6 +216,7 @@ class SearchState:
         self.tt_score = np.zeros(size, dtype=np.int64)
         self.tt_depth = np.full(size, -1, dtype=np.int64)
         self.tt_flag = np.zeros(size, dtype=np.int64)
+        self.tt_eval = np.full(size, NO_EVAL, dtype=np.int64)
         self.history = np.zeros((2, 7, 64), dtype=np.int64)
         self.killers = np.full((MAX_DEPTH + 1, 2), NO_MOVE, dtype=np.int64)
         self.path = np.zeros(MAX_DEPTH * 2 + 8, dtype=np.uint64)
@@ -617,8 +631,15 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     # static eval, shared by reverse futility and null-move here and late-move / futility
     # pruning in the move loop. computed whenever not in check - the eval misjudges a position
     # in check - regardless of depth, since null-move pruning needs it past the shallow cutoff.
+    # reuse the TT's cached eval on a key match: evaluate is pure in (acc, side), so it is the
+    # exact value evaluate(board) would return, minus the NNUE forward.
     shallow = depth <= LMP_MAX_DEPTH and not in_check
-    static_eval = evaluate(board) if not in_check else 0
+    if in_check:
+        static_eval = 0
+    elif EVAL_CACHE and tt_hit and state.tt_eval[slot] != NO_EVAL:
+        static_eval = state.tt_eval[slot]
+    else:
+        static_eval = evaluate(board)
 
     # reverse futility pruning: so far ahead that conceding RFP_MARGIN per remaining ply still
     # clears beta, so assume the real search fails high too.
@@ -790,6 +811,7 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     state.tt_score[slot] = score_to_tt(best, ply)
     state.tt_depth[slot] = depth
     state.tt_flag[slot] = flag
+    state.tt_eval[slot] = NO_EVAL if in_check else static_eval  # cache the NNUE eval for revisits
 
     return best
 
@@ -835,8 +857,10 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
     # ref: https://www.chessprogramming.org/Transposition_Table
     slot = key & TT_MASK
     tt_move = NO_MOVE
+    tt_eval_cached = NO_EVAL
     if state.tt_depth[slot] >= 0 and state.tt_key[slot] == key:
         tt_move = state.tt_move[slot]
+        tt_eval_cached = state.tt_eval[slot]
         tt_score = score_from_tt(state.tt_score[slot], ply)
         flag = state.tt_flag[slot]
 
@@ -858,8 +882,12 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
         n = count
         standing_pat = -MATE_SCORE
     else:
-        # the side to move can decline to capture, so the static evaluation is a floor
-        standing_pat = evaluate(board)
+        # the side to move can decline to capture, so the static evaluation is a floor. a TT
+        # key match carries the exact eval (evaluate is pure in acc/side) - reuse it.
+        if EVAL_CACHE and tt_eval_cached != NO_EVAL:
+            standing_pat = tt_eval_cached
+        else:
+            standing_pat = evaluate(board)
 
         if standing_pat >= beta:
             return standing_pat
@@ -929,6 +957,7 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
     state.tt_score[slot] = score_to_tt(alpha, ply)
     state.tt_depth[slot] = 0
     state.tt_flag[slot] = flag
+    state.tt_eval[slot] = NO_EVAL if in_check else standing_pat  # cache the NNUE eval for revisits
 
     return alpha
 
@@ -1104,6 +1133,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
         # if it has filled enough slots to be a memory concern.
         if tt_used() > TT_MAX_ENTRIES:
             STATE.tt_depth[:] = -1
+            STATE.tt_eval[:] = NO_EVAL
 
         return move_uci(int(best))
     
@@ -1124,6 +1154,7 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     STATE.deadline = time.monotonic() + 3600.0
     STATE.avoid = NO_MOVE
     STATE.tt_depth[:] = -1
+    STATE.tt_eval[:] = NO_EVAL
     STATE.history[:] = 0
     STATE.killers[:] = NO_MOVE
 
