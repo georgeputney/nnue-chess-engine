@@ -28,12 +28,12 @@ PIECE_CP = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, ches
 
 
 def _reset() -> None:
-    agent._STATE.tt_depth[:] = -1
-    agent._STATE.history[:] = 0
-    agent._STATE.killers[:] = agent.NO_MOVE
-    agent._STATE.avoid = agent.NO_MOVE
-    agent._SEEN.clear()
-    agent._PLAYED.clear()
+    agent.STATE.tt_depth[:] = -1
+    agent.STATE.history[:] = 0
+    agent.STATE.killers[:] = agent.NO_MOVE
+    agent.STATE.avoid = agent.NO_MOVE
+    agent.SEEN.clear()
+    agent.PLAYED.clear()
     reference.TT.clear()
     reference.KILLERS[:] = [[None, None] for _ in range(len(reference.KILLERS))]
     for _side in reference.HISTORY:

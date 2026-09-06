@@ -29,14 +29,14 @@ def main() -> None:
         for occ in occupancies:
             checked += 1
             got = attacks.bishop_attacks(sq, occ)
-            want = attacks._bishop_attacks_reference(sq, occ)
+            want = attacks.bishop_attacks_reference(sq, occ)
             if got != want:
                 mismatches += 1
                 print(f"BISHOP MISMATCH sq={sq} occ={occ:#x} got={got:#x} want={want:#x}")
 
             checked += 1
             got = attacks.rook_attacks(sq, occ)
-            want = attacks._rook_attacks_reference(sq, occ)
+            want = attacks.rook_attacks_reference(sq, occ)
             if got != want:
                 mismatches += 1
                 print(f"ROOK MISMATCH sq={sq} occ={occ:#x} got={got:#x} want={want:#x}")
