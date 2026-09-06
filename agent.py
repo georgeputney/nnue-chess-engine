@@ -185,6 +185,12 @@ MIDGAME_PST = np.array([tables.MIDGAME_PST[vt] for vt in range(7)], dtype=np.int
 ENDGAME_PST = np.array([tables.ENDGAME_PST[vt] for vt in range(7)], dtype=np.int64)
 PAWN_AHEAD_MG = np.array([tables.PAWN_AHEAD_MG.get(vt, 0) for vt in range(7)], dtype=np.int64)
 PAWN_AHEAD_EG = np.array([tables.PAWN_AHEAD_EG.get(vt, 0) for vt in range(7)], dtype=np.int64)
+# passed-pawn bonus indexed by relative rank (0..7, how far the pawn has advanced toward
+# promotion), and the endgame-only king-activity weights for an advanced passer.
+PASSED_PAWN_MG = np.array(tables.PASSED_PAWN_MG, dtype=np.int64)
+PASSED_PAWN_EG = np.array(tables.PASSED_PAWN_EG, dtype=np.int64)
+KING_PASSER_OWN_EG = tables.KING_PASSER_OWN_EG
+KING_PASSER_ENEMY_EG = tables.KING_PASSER_ENEMY_EG
 # mobility weight per virtual type (only bishop / rook / queen non-zero); phase weight per
 # bitboard piece id (knight / bishop 1, rook 2, queen 4).
 MOBILITY_MG = np.zeros(7, dtype=np.int64)
@@ -196,6 +202,33 @@ for piece_type, weight in tables.MOBILITY_WEIGHT_EG.items():
 PHASE_WEIGHT = np.array((0, 1, 1, 2, 4, 0), dtype=np.int64)
 
 FULL_BB = np.uint64((1 << 64) - 1)
+
+
+# PASSED_MASK[colour][square]: the squares an enemy pawn would have to stand on to stop `square`
+# being a passed pawn - `square`'s own file and the two adjacent files, on every rank ahead of
+# it toward promotion. Built once in plain Python and frozen for the jitted evaluate().
+# ref: https://www.chessprogramming.org/Passed_Pawn
+def build_passed_masks() -> np.ndarray:
+    masks = np.zeros((2, 64), dtype=np.uint64)
+    for square in range(64):
+        file = square & 7
+        rank = square >> 3
+        files = 0
+        for adjacent in (file - 1, file, file + 1):
+            if 0 <= adjacent <= 7:
+                files |= 0x0101_0101_0101_0101 << adjacent
+        white_ahead = 0
+        for r in range(rank + 1, 8):
+            white_ahead |= 0xFF << (8 * r)
+        black_ahead = 0
+        for r in range(rank):
+            black_ahead |= 0xFF << (8 * r)
+        masks[WHITE, square] = np.uint64(files & white_ahead)
+        masks[1, square] = np.uint64(files & black_ahead)
+    return masks
+
+
+PASSED_MASK = build_passed_masks()
 
 # per-game anti-repetition, keyed by zobrist hash: how many times we have been asked to move in
 # a position, and what we chose there last (reference.py keeps SEEN / PLAYED the same way).
@@ -283,6 +316,19 @@ def slider_scope(square: int, occupied: int) -> int:
     return popcount(queen_attacks(np.uint8(square), occupied))
 
 
+# King-move distance between two squares (chess.square_distance): the larger of the file and
+# rank gaps - how many moves a king needs to get from one to the other.
+@njit(cache=True)
+def chebyshev(a: int, b: int) -> int:
+    file_gap = (a & 7) - (b & 7)
+    rank_gap = (a >> 3) - (b >> 3)
+    if file_gap < 0:
+        file_gap = -file_gap
+    if rank_gap < 0:
+        rank_gap = -rank_gap
+    return file_gap if file_gap > rank_gap else rank_gap
+
+
 # Static score in centipawns from the side to move's point of view - reference.evaluate off
 # bitboards, jitted end to end. Each colour's terms are summed from white's side and negated at
 # the end for black; every weight is Texel-tuned, from tables.py.
@@ -294,11 +340,16 @@ def evaluate(board: Board) -> int:
     endgame = 0
     phase = 0
 
+    white_king_square = lsb_index(board.pieces[WHITE, KING])
+    black_king_square = lsb_index(board.pieces[1, KING])
+
     for colour in range(2):
         sign = 1 if colour == WHITE else -1
         own_pawns = board.pieces[colour, 0]
+        enemy_pawns = board.pieces[1 - colour, 0]
 
-        king_square = lsb_index(board.pieces[colour, KING])
+        king_square = white_king_square if colour == WHITE else black_king_square
+        enemy_king_square = black_king_square if colour == WHITE else white_king_square
         king_file = king_square & 7
 
         for piece_type in range(6):
@@ -347,6 +398,21 @@ def evaluate(board: Board) -> int:
                 stacked = pawns_ahead(square, colour, own_pawns)
                 mg += PAWN_AHEAD_MG[virtual_type] * stacked
                 eg += PAWN_AHEAD_EG[virtual_type] * stacked
+
+                # passed pawn: no enemy pawn ahead on its file or an adjacent one. bonus by how
+                # far it has advanced; once it is past the middle, also score how near each king
+                # stands to the square in front of it - the endgame's central race.
+                # ref: https://www.chessprogramming.org/Passed_Pawn
+                if piece_type == 0 and enemy_pawns & PASSED_MASK[colour, square] == 0:
+                    rank = np.int64(square >> 3)
+                    relative_rank = rank if colour == WHITE else 7 - rank
+                    mg += PASSED_PAWN_MG[relative_rank]
+                    eg += PASSED_PAWN_EG[relative_rank]
+
+                    if relative_rank >= 4:
+                        stop = np.int64(square) + 8 if colour == WHITE else np.int64(square) - 8
+                        eg += KING_PASSER_OWN_EG * chebyshev(king_square, stop)
+                        eg += KING_PASSER_ENEMY_EG * chebyshev(enemy_king_square, stop)
 
                 midgame += sign * mg
                 endgame += sign * eg

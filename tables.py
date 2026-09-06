@@ -194,3 +194,19 @@ TEMPO_EG = 10
 # penalty, -12 either phase; tools/tune.py is free to find a value for the rest.
 PAWN_AHEAD_MG: dict[int, int] = {0: -12, 1: -12, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
 PAWN_AHEAD_EG: dict[int, int] = {0: -12, 1: -12, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+
+# passed pawn: no enemy pawn on its own file or either adjacent file, on any rank ahead of it.
+# bonus by how far it has advanced toward promotion (relative rank, 1..6 - a pawn is never on
+# its own back rank or the promotion rank, so slots 0 and 7 never apply). The endgame PST
+# already ramps steeply for an advanced pawn, so these seeds are only the *marginal* worth of
+# it being passed rather than merely far up the board; a tuning pass that fits the two together
+# would set them properly. ref: https://www.chessprogramming.org/Passed_Pawn
+PASSED_PAWN_MG = [0, 1, 3, 7, 13, 24, 40, 0]
+PASSED_PAWN_EG = [0, 6, 10, 17, 30, 52, 82, 0]
+
+# king activity around an advanced passed pawn (relative rank >= 4 only): Chebyshev distance
+# from each king to the square directly in front of the pawn, scored in the endgame only. Own
+# king close in is worth having (negative weight); the enemy king kept away is too (positive).
+# ref: https://www.chessprogramming.org/King_Activity
+KING_PASSER_OWN_EG = -5
+KING_PASSER_ENEMY_EG = 5

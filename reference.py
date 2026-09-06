@@ -19,11 +19,15 @@ from tables import (
     ENDGAME_PST,
     KING_EXPOSURE_EG,
     KING_EXPOSURE_MG,
+    KING_PASSER_ENEMY_EG,
+    KING_PASSER_OWN_EG,
     MATERIAL_EG,
     MATERIAL_MG,
     MIDGAME_PST,
     MOBILITY_WEIGHT_EG,
     MOBILITY_WEIGHT_MG,
+    PASSED_PAWN_EG,
+    PASSED_PAWN_MG,
     PAWN_AHEAD_EG,
     PAWN_AHEAD_MG,
     TEMPO_EG,
@@ -32,6 +36,26 @@ from tables import (
 
 popcount = chess.popcount  # aliased once; called per slider in the eval loop
 FULL_BB = (1 << 64) - 1
+
+# PASSED_MASK[colour][square]: the squares an enemy pawn must occupy to stop `square` being a
+# passed pawn - its own file and the two adjacent files, on every rank ahead toward promotion.
+# Built once; agent.build_passed_masks is the bitboard-layer twin.
+# ref: https://www.chessprogramming.org/Passed_Pawn
+def _build_passed_masks() -> dict[chess.Color, list[int]]:
+    masks: dict[chess.Color, list[int]] = {chess.WHITE: [0] * 64, chess.BLACK: [0] * 64}
+    for square in range(64):
+        file = chess.square_file(square)
+        rank = chess.square_rank(square)
+        files = 0
+        for adjacent in (file - 1, file, file + 1):
+            if 0 <= adjacent <= 7:
+                files |= chess.BB_FILES[adjacent]
+        masks[chess.WHITE][square] = files & sum(chess.BB_RANKS[r] for r in range(rank + 1, 8))
+        masks[chess.BLACK][square] = files & sum(chess.BB_RANKS[r] for r in range(rank))
+    return masks
+
+
+PASSED_MASK = _build_passed_masks()
 
 # virtual piece type: a pawn on the far side of the board from its own king behaves
 # differently (storms, weak shelter) and scores on its own material/PST/pawn-ahead row
@@ -271,10 +295,15 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
         chess.WHITE: board.pawns & board.occupied_co[chess.WHITE],
         chess.BLACK: board.pawns & board.occupied_co[chess.BLACK],
     }
+    white_king_sq = board.king(chess.WHITE)
+    black_king_sq = board.king(chess.BLACK)
+
+    kings_known = white_king_sq is not None and black_king_sq is not None
 
     for colour in (chess.WHITE, chess.BLACK):
         sign = 1 if colour == chess.WHITE else -1
         own_pawns = pawns_by_colour[colour]
+        enemy_pawns = pawns_by_colour[not colour]
 
         king_sq = board.king(colour)
         king_file = chess.square_file(king_sq) if king_sq is not None else 4
@@ -315,6 +344,24 @@ def evaluate(board: chess.Board, side: chess.Color) -> int:
                 stacked = pawns_ahead(square, colour, own_pawns)
                 mg += PAWN_AHEAD_MG.get(vt, 0) * stacked
                 eg += PAWN_AHEAD_EG.get(vt, 0) * stacked
+
+                # passed pawn: no enemy pawn ahead on its file or an adjacent one. bonus by how
+                # far it has advanced; once past the middle, also score how near each king
+                # stands to the square in front of it - the endgame's central race.
+                # ref: https://www.chessprogramming.org/Passed_Pawn
+                if pt == chess.PAWN and not enemy_pawns & PASSED_MASK[colour][square]:
+                    rank = chess.square_rank(square)
+                    relative_rank = rank if colour == chess.WHITE else 7 - rank
+                    mg += PASSED_PAWN_MG[relative_rank]
+                    eg += PASSED_PAWN_EG[relative_rank]
+
+                    if relative_rank >= 4 and kings_known:
+                        assert white_king_sq is not None and black_king_sq is not None
+                        stop = square + 8 if colour == chess.WHITE else square - 8
+                        own_king = white_king_sq if colour == chess.WHITE else black_king_sq
+                        enemy_king = black_king_sq if colour == chess.WHITE else white_king_sq
+                        eg += KING_PASSER_OWN_EG * chess.square_distance(own_king, stop)
+                        eg += KING_PASSER_ENEMY_EG * chess.square_distance(enemy_king, stop)
 
                 midgame += sign * mg
                 endgame += sign * eg
