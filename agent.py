@@ -151,6 +151,9 @@ IIR_MIN_DEPTH = 7         # internal iterative reduction: fires only at least th
 ASPIRATION_MIN_DEPTH = 4  # full-width search up to here, a thin window after
 ASPIRATION_WINDOW = 25    # aspiration half-width in cp, doubled on each miss
 REPETITION_PENALTY = 400  # cp docked at the root for replaying a move that loops the game
+CONTEMPT = 30             # cp a draw is worth to us, negated: the search plays on from a level
+                          # position rather than settle for a repetition. Mirrored in
+                          # reference.py as CONTEMPT - keep the two equal.
 
 LMP = np.array([3 + d * d for d in range(LMP_MAX_DEPTH + 1)], dtype=np.int64)  # quiet cap by depth
 NO_MOVE = -1
@@ -476,6 +479,16 @@ def repetitions(path: np.ndarray, upto: int, node_hash: int) -> int:
     return n
 
 
+# A draw scored from the side-to-move's view at `ply`: negative when it is our move (an even ply
+# from the root), positive when it is the opponent's. A repetition or stalemate then only wins
+# the search when every real try is worse than conceding CONTEMPT, so a level game is played on
+# rather than settled. reference._contempt_draw.
+# ref: https://www.chessprogramming.org/Contempt_Factor
+@njit(cache=True)
+def contempt_draw(ply: int) -> int:
+    return -CONTEMPT if ply % 2 == 0 else CONTEMPT
+
+
 # The four-tier ordering key (tt move, MVV-LVA, killer, history) packed into one int so an
 # argsort reproduces reference.negamax's tuple sort exactly: each shift clears the full range
 # of every lower tier (history is +/- MAX_HISTORY, lifted non-negative by the trailing 1<<16).
@@ -509,7 +522,7 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     # the second) keeps this off a position the game has only reached once for real.
     # ref: https://www.chessprogramming.org/Repetitions
     if repetitions(state.path, ply + 1, key) >= 3:
-        return 0
+        return contempt_draw(ply)
 
     # mate-distance pruning: clamp the window to the mate band still reachable from here.
     # ref: https://www.chessprogramming.org/Score#Mate_Distance_Pruning
@@ -556,7 +569,7 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     # no legal moves: checkmate if in check, else stalemate (a draw). the +ply makes a mate
     # found sooner score higher once negated back up the tree.
     if count == 0:
-        return -MATE_SCORE + ply if in_check else 0
+        return -MATE_SCORE + ply if in_check else contempt_draw(ply)
 
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
@@ -671,7 +684,7 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
         # threefold rule, so the search can still steer into or away from the draw.
         # ref: https://www.chessprogramming.org/Repetitions
         if child.halfmove_clock >= 4 and repetitions(state.path, ply + 1, child.zobrist) >= 1:
-            score = 0
+            score = contempt_draw(ply)
         elif r == 0:
             # the move the ordering trusts most - full-window principal variation search.
             # ref: https://www.chessprogramming.org/Principal_Variation_Search
@@ -771,7 +784,7 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
     # threefold repetition is a draw - same guard as negamax. a check sequence that runs into
     # the qsearch tail can still cycle; without this it just keeps searching it.
     if repetitions(state.path, ply + 1, key) >= 3:
-        return 0
+        return contempt_draw(ply)
 
     in_check = is_check(board, board.side)
 
@@ -911,8 +924,9 @@ def search_root(
         child = make_move(board, move)
         
         if child.halfmove_clock >= 4 and repetitions(state.path, 1, child.zobrist) >= 1:
-            # this move brings a position up for the second time - a draw (see negamax)
-            score = 0
+            # this move brings a position up for the second time - a draw (see negamax). the
+            # root is our move, so contempt_draw(0) docks it: don't repeat unless all else is worse
+            score = contempt_draw(0)
         elif r == 0:
             # first move: full window; children search from ply 1 so a mate there is mate-in-1
             score = -negamax(state, child, depth - 1, -beta, -alpha, 1)

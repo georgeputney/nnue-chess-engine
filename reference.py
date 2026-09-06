@@ -132,6 +132,12 @@ ASPIRATION_WINDOW = 25      # aspiration half-width in cp, doubled on each miss
 # ~360 cp - see the commit). MATE_THRESHOLD still exempts a real forced mate.
 REPETITION_PENALTY = 400
 
+# cp a draw is worth to us, negated: a repetition or stalemate only wins the search when every
+# real try is worse than conceding this much, so a level game is played on rather than settled
+# for a repeat. Mirrored in agent.py as CONTEMPT - keep the two equal.
+# ref: https://www.chessprogramming.org/Contempt_Factor
+CONTEMPT = 30
+
 # lookup table built once at import so the search never recomputes it per node
 _LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]  # quiet-move cap by depth: 4, 7, 12, 19, ...
 
@@ -139,6 +145,12 @@ _LMP = [3 + d * d for d in range(LMP_MAX_DEPTH + 1)]  # quiet-move cap by depth:
 # Thrown when the search hits the time cap; get_move catches it.
 class Timeout(Exception):
     pass
+
+
+# A draw scored from the side-to-move's view at `ply`: negative when it is our move (an even ply
+# from the root), positive when it is the opponent's. agent.contempt_draw.
+def _contempt_draw(ply: int) -> int:
+    return -CONTEMPT if ply % 2 == 0 else CONTEMPT
 
 
 # How many of `colour`'s pawns stand on `square`'s file, strictly ahead of it toward the far
@@ -360,7 +372,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     # threefold repetition is a draw. checking for the third occurrence (not the second)
     # keeps this from firing on a position the game has only reached once for real.
     if board.is_repetition(3):
-        return 0
+        return _contempt_draw(ply)
 
     # mate-distance pruning: we cannot be mated sooner than `ply` from here, nor deliver
     # mate sooner than `ply + 1`. clamp the window to that band; if it collapses, no move
@@ -403,7 +415,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
     # no legal moves: checkmate if in check, else stalemate (a draw). the +ply makes a mate
     # found sooner score higher once negated back up the tree.
     if not moves:
-        return -MATE_SCORE + ply if board.is_check() else 0
+        return -MATE_SCORE + ply if board.is_check() else _contempt_draw(ply)
 
     # out of depth: hand off to a captures-only search so we don't judge a half-finished trade
     if depth <= 0:
@@ -519,7 +531,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> 
         # from it when better.
         # ref: https://www.chessprogramming.org/Repetitions
         if board.halfmove_clock >= 4 and board.is_repetition(2):
-            score = 0
+            score = _contempt_draw(ply)
         elif i == 0:
             # the move the ordering trusts most - full-window principal variation search
             # ref: https://www.chessprogramming.org/Principal_Variation_Search
@@ -608,7 +620,7 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
     # into the qsearch tail (every reply is searched here, not just captures) can still
     # cycle; without this, quiescence has no way to notice and just keeps searching it.
     if board.is_repetition(3):
-        return 0
+        return _contempt_draw(ply)
 
     # recursion floor, matching negamax's - the only thing that bounds a checking sequence
     # here, since the in-check branch below searches every reply rather than spending depth.
@@ -715,8 +727,9 @@ def search_root(
     for i, move in enumerate(moves):
         board.push(move)
         if board.halfmove_clock >= 4 and board.is_repetition(2):
-            # this move brings a position up for the second time - a draw (see negamax)
-            score = 0
+            # this move brings a position up for the second time - a draw (see negamax). the
+            # root is our move, so _contempt_draw(0) docks it: no repeat unless all else is worse
+            score = _contempt_draw(0)
         elif i == 0:
             # first move: full window; children search from ply 1 so a mate there is mate-in-1
             score = -negamax(board, depth - 1, -beta, -alpha, 1)

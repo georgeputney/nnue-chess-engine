@@ -20,11 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("AGENT_WARM_UP_S", "0")
 
 from harness.referee import FAILED_TERMINATIONS, play_match
+from harness.rules import PLY_CAP
 from harness.sandbox import local
 
-# one unit of work: opening index, the two agent dirs, the start fen, whether the agent takes
-# white, and the clock in ms
-GameTask = tuple[int, str, str, str, bool, int, int]
+# one unit of work: position index, the two agent dirs, the start fen, whether the agent takes
+# white, the clock in ms (base, increment), and the ply cap for this game
+GameTask = tuple[int, str, str, str, bool, int, int, int]
 # what comes back: opening index, agent-was-white, points for the agent, how it ended, and any
 # stderr captured when a side broke
 GameResult = tuple[int, bool, float, str, str]
@@ -82,10 +83,11 @@ OPENINGS: list[str] = [
 # side. on a failed termination it also pulls back whichever process wrote to stderr, tagged
 # agent or opponent, so main() can print it
 def one_game(task: GameTask) -> GameResult:
-    index, agent, opponent, fen, agent_is_white, base_ms, increment_ms = task
+    index, agent, opponent, fen, agent_is_white, base_ms, increment_ms, ply_cap = task
     white, black = (agent, opponent) if agent_is_white else (opponent, agent)
     white_agent, black_agent = local(Path(white)), local(Path(black))
-    outcome = play_match(white_agent, black_agent, base_ms, increment_ms, start_fen=fen)
+    outcome = play_match(white_agent, black_agent, base_ms, increment_ms,
+                         ply_cap=ply_cap, start_fen=fen)
 
     if outcome.result in ("draw", "void"):
         points = 0.5
@@ -117,46 +119,41 @@ def elo(score: float) -> float:
     return -400.0 * math.log10(1.0 / score - 1.0)
 
 
-# usage:
-#     uv run python tools/bench.py --agent . --opponent baselines/minimax
-#     uv run python tools/bench.py --agent . --opponent baselines/minimax \
-#         --openings 40 --base-ms 5000 --increment-ms 100 --workers 4
-#
-# fans the opening x colour grid across a process pool, prints each game as it lands, then a
-# final score and Elo band. exits non-zero only via one_game failures surfaced at the end
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", required=True)
-    parser.add_argument("--opponent", required=True)
-    parser.add_argument("--openings", type=int, default=len(OPENINGS))
-    parser.add_argument("--base-ms", type=int, default=5000)
-    parser.add_argument("--increment-ms", type=int, default=100)
-    parser.add_argument("--workers", type=int,
-                        default=max(1, (os.cpu_count() or 2) // 2 - 1))
-    args = parser.parse_args()
-
-    for role, path in (("agent", args.agent), ("opponent", args.opponent)):
+# fans the position x colour grid across a process pool, prints each game as it lands, then a
+# final score and Elo band. `kind` only labels the per-game line ("opening" / "endgame"). shared
+# with tools/endgame_bench.py, which passes its own position set. exits non-zero only via
+# one_game failures surfaced at the end
+def run_suite(
+    agent: str,
+    opponent: str,
+    positions: list[str],
+    base_ms: int,
+    increment_ms: int,
+    workers: int,
+    kind: str = "opening",
+    ply_cap: int = PLY_CAP,
+) -> None:
+    for role, path in (("agent", agent), ("opponent", opponent)):
         if not (Path(path) / "agent.py").is_file():
             raise SystemExit(f"no {role}: {Path(path) / 'agent.py'} does not exist")
 
-    chosen = OPENINGS[:args.openings]
     tasks: list[GameTask] = [
-        (i + 1, args.agent, args.opponent, fen, white, args.base_ms, args.increment_ms)
-        for i, fen in enumerate(chosen)
+        (i + 1, agent, opponent, fen, white, base_ms, increment_ms, ply_cap)
+        for i, fen in enumerate(positions)
         for white in (True, False)
     ]
-    print(f"{len(tasks)} games over {len(chosen)} openings, {args.workers} in parallel\n")
+    print(f"{len(tasks)} games over {len(positions)} {kind}s, {workers} in parallel\n")
 
     # each game runs two agent processes, so half the cores keeps both sides off a contended
     # core. more workers makes the results noisier, not faster
     verdicts = {1.0: "win", 0.5: "draw", 0.0: "loss"}
     results: list[tuple[float, str]] = []
     failures: list[tuple[int, str, str, str]] = []
-    with Pool(args.workers) as pool:
+    with Pool(workers) as pool:
         for done, (index, agent_white, points, termination, detail) in enumerate(
                 pool.imap_unordered(one_game, tasks), start=1):
             colour = "white" if agent_white else "black"
-            print(f"[{done:3d}/{len(tasks)}] opening {index:2d}  agent {colour}  "
+            print(f"[{done:3d}/{len(tasks)}] {kind} {index:2d}  agent {colour}  "
                   f"{verdicts[points]:4s}  ({termination})")
             results.append((points, termination))
             if detail:
@@ -175,7 +172,7 @@ def main() -> None:
     low = elo(min(0.999, max(0.001, score - 1.96 * stderr)))
     high = elo(min(0.999, max(0.001, score + 1.96 * stderr)))
 
-    print(f"\n{args.agent} vs {args.opponent}")
+    print(f"\n{agent} vs {opponent}")
     print(f"+{wins} ={draws} -{losses}  score {score:.1%}")
     middle = elo(min(0.999, max(0.001, score)))
     print(f"elo {middle:+.0f}  95% ci [{low:+.0f}, {high:+.0f}]")
@@ -185,8 +182,27 @@ def main() -> None:
     if broken:
         print("FAILURES: " + ", ".join(f"{k} {v}" for k, v in broken.items()))
         for index, colour, termination, detail in failures:
-            print(f"\n--- opening {index}, agent {colour}, {termination} ---")
+            print(f"\n--- {kind} {index}, agent {colour}, {termination} ---")
             print(detail or "  (no stderr captured)")
+
+
+# usage:
+#     uv run python tools/bench.py --agent . --opponent baselines/minimax
+#     uv run python tools/bench.py --agent . --opponent baselines/minimax \
+#         --openings 40 --base-ms 5000 --increment-ms 100 --workers 4
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--opponent", required=True)
+    parser.add_argument("--openings", type=int, default=len(OPENINGS))
+    parser.add_argument("--base-ms", type=int, default=5000)
+    parser.add_argument("--increment-ms", type=int, default=100)
+    parser.add_argument("--workers", type=int,
+                        default=max(1, (os.cpu_count() or 2) // 2 - 1))
+    args = parser.parse_args()
+
+    run_suite(args.agent, args.opponent, OPENINGS[:args.openings],
+              args.base_ms, args.increment_ms, args.workers)
 
 
 if __name__ == "__main__":
