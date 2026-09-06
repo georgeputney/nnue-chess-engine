@@ -11,7 +11,6 @@ python-chess version this was ported from - the verify_* tools check against it,
 falls back to it if numba fails to compile.
 """
 
-import os
 import time
 
 import numba as nb
@@ -863,3 +862,16 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     board.zobrist = np.uint64(zobrist_hash(board))
     move, score = search_root(_STATE, board, depth, -MATE_SCORE, MATE_SCORE, NO_MOVE)
     return move_uci(int(move)), int(score), int(_STATE.nodes)
+
+
+# Compile the search inside the platform's 90 s init budget - a shallow run still reaches every
+# hot path (quiescence, null-move, LMR, futility) - so the first real move of a game does not
+# pay a multi-second numba JIT stall on the clock. No timed opening search: rated games start
+# from unpublished mid-opening positions that share almost none of that tree.
+def _warm_up() -> None:
+    board = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    board.zobrist = np.uint64(zobrist_hash(board))
+    search_root(_STATE, board, 4, -MATE_SCORE, MATE_SCORE, NO_MOVE)
+
+
+_warm_up()

@@ -521,6 +521,12 @@ def make_move(pos: Board, move: int) -> Board:
     promotion = move_promotion_raw(move)
     is_capture = move_is_capture(move)
     is_castle = move_is_castle(move)
+    is_ep = move_is_en_passant(move)
+    captured_sq = to + (-8 if colour == WHITE else 8)  # only meaningful when is_ep
+    if to == frm + 2:  # kingside: the rook a-side of the king hops in; only used when is_castle
+        rook_from, rook_to = frm + 3, frm + 1
+    else:  # queenside
+        rook_from, rook_to = frm - 4, frm - 1
 
     # incremental zobrist: start from the parent's hash and XOR in every change below. it must
     # track zobrist.zobrist_hash exactly - tools/verify_zobrist.py checks that after every
@@ -532,8 +538,7 @@ def make_move(pos: Board, move: int) -> Board:
     new.pieces[colour, piece] &= clear_mask(frm)
     h ^= PIECE_SQUARE_KEYS[colour, piece, frm]
 
-    if move_is_en_passant(move):
-        captured_sq = to + (-8 if colour == WHITE else 8)
+    if is_ep:
         new.pieces[opp, PAWN] &= clear_mask(captured_sq)
         h ^= PIECE_SQUARE_KEYS[opp, PAWN, captured_sq]
     elif is_capture:
@@ -548,10 +553,6 @@ def make_move(pos: Board, move: int) -> Board:
     h ^= PIECE_SQUARE_KEYS[colour, placed, to]
 
     if is_castle:
-        if to == frm + 2:  # kingside: rook a-side of the king moves in
-            rook_from, rook_to = frm + 3, frm + 1
-        else:  # queenside
-            rook_from, rook_to = frm - 4, frm - 1
         new.pieces[colour, ROOK] &= clear_mask(rook_from)
         new.pieces[colour, ROOK] |= bit(rook_to)
         h ^= PIECE_SQUARE_KEYS[colour, ROOK, rook_from] ^ PIECE_SQUARE_KEYS[colour, ROOK, rook_to]
@@ -581,7 +582,20 @@ def make_move(pos: Board, move: int) -> Board:
     new.side = opp
     new.zobrist = h
 
-    recompute_occupancy(new)
+    # occupancy, updated from the parent's rather than rebuilt from twelve bitboards: the mover
+    # leaves frm and lands on to (a castling rook moves with it), and a captured man leaves the
+    # board - the en-passant victim from its own square, any other from the to-square.
+    own_occ = (pos.occupancy[colour] & clear_mask(frm)) | bit(to)
+    if is_castle:
+        own_occ = (own_occ & clear_mask(rook_from)) | bit(rook_to)
+    opp_occ = pos.occupancy[opp]
+    if is_ep:
+        opp_occ &= clear_mask(captured_sq)
+    elif is_capture:
+        opp_occ &= clear_mask(to)
+    new.occupancy[colour] = own_occ
+    new.occupancy[opp] = opp_occ
+    new.occupancy[2] = own_occ | opp_occ
     return new
 
 
@@ -647,7 +661,8 @@ def legal_moves(pos: Board) -> tuple[np.ndarray, int]:
         if blockers != 0 and blockers & (blockers - nb.uint64(1)) == 0 and blockers & own_occ:
             pinned |= blockers
 
-    legal = np.empty(MAX_MOVES, dtype=np.int64)
+    # legal moves are compacted back into the pseudo array in place - the write index never
+    # overtakes the read index - so this costs no second MAX_MOVES allocation per node.
     legal_count = 0
     for i in range(pseudo_count):
         move = pseudo[i]
@@ -657,14 +672,14 @@ def legal_moves(pos: Board) -> tuple[np.ndarray, int]:
 
         if piece == KING:
             if move_is_castle(move):
-                legal[legal_count] = move  # _castling_moves_nb proved every square safe already
+                pseudo[legal_count] = move  # _castling_moves_nb proved every square safe already
                 legal_count += 1
                 continue
             test_occ = occ ^ bit(ksq)
             if move_is_capture(move):
                 test_occ &= clear_mask(to)
             if not _attacked_by_with_occ(pos, to, them, test_occ):  # type: ignore[arg-type]
-                legal[legal_count] = move
+                pseudo[legal_count] = move
                 legal_count += 1
             continue
 
@@ -673,7 +688,7 @@ def legal_moves(pos: Board) -> tuple[np.ndarray, int]:
 
         if move_is_en_passant(move):
             if not is_check(make_move(pos, move), us):  # type: ignore[arg-type, type-var, call-arg]
-                legal[legal_count] = move
+                pseudo[legal_count] = move
                 legal_count += 1
             continue
 
@@ -681,10 +696,10 @@ def legal_moves(pos: Board) -> tuple[np.ndarray, int]:
             continue
         if bit(frm) & pinned and bit(to) & _LINE_NB[ksq, frm] == 0:
             continue
-        legal[legal_count] = move
+        pseudo[legal_count] = move
         legal_count += 1
 
-    return legal, legal_count
+    return pseudo, legal_count
 
 
 # compile every jitted function above now, inside the init budget - a real position, not an
