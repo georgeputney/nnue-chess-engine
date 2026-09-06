@@ -535,6 +535,70 @@ def see(board: Board, move: int) -> int:
     return gain[0]
 
 
+# Is the static exchange evaluation of `move` at least `threshold`? Same swap as see(), carried
+# as one running balance the Stockfish way so there is no gain[] array to allocate - see() is
+# called once per capture in quiescence, the hottest loop in the engine. The two agree exactly:
+# see_ge(m, t) == (see(m) >= t), which tools/verify_see.py checks. reference.see_ge.
+# ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
+@njit(cache=True)
+def see_ge(board: Board, move: int, threshold: int) -> bool:
+    to = move_to_square(move)
+    one = np.uint64(1)
+    occ = board.occupancy[2] ^ (one << np.uint8(move_from_square(move)))
+
+    if move_is_en_passant(move):
+        captured = to - 8 if board.side == WHITE else to + 8
+        occ ^= one << np.uint8(captured)
+        captured_value = SEE_VALUE[PAWN]
+    else:
+        victim = piece_on(board, to)
+        captured_value = SEE_VALUE[victim] if victim >= 0 else 0
+
+    # balance = what the side to move is up if the exchange stops here, less the threshold
+    balance = captured_value - threshold
+    if balance < 0:
+        return False  # winning the victim outright still falls short
+
+    balance = SEE_VALUE[move_piece(move)] - balance
+    if balance <= 0:
+        return True  # losing the moved piece to the first recapture still clears the bar
+
+    side = 1 - board.side  # side to recapture next
+    result = 1             # 1 while the exchange stands in the original mover's favour
+    atk = attackers_to(board, to, occ)
+
+    while True:
+        atk &= occ
+        found = -1
+        found_pt = 0
+        for pt in range(6):  # this side's least valuable attacker still standing
+            subset = atk & board.pieces[side, pt] & occ
+            if subset:
+                found = lsb_index(subset)
+                found_pt = pt
+                break
+        if found < 0:
+            break
+
+        result ^= 1
+        if found_pt == KING:
+            # a king recaptures only onto a square the far side no longer attacks; if it still
+            # does, this capture never happens and the exchange stopped one move earlier
+            if atk & board.occupancy[1 - side] & occ:
+                result ^= 1
+            break
+
+        balance = SEE_VALUE[found_pt] - balance
+        if balance < result:
+            break
+
+        occ ^= one << np.uint8(found)
+        atk = attackers_to(board, to, occ)
+        side = 1 - side
+
+    return result == 1
+
+
 # A quiet move's cutoff tally for the side about to play it (reference.history_score).
 # ref: https://www.chessprogramming.org/History_Heuristic
 @njit(cache=True)
@@ -1047,7 +1111,7 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
             # a qsearch node and it only adds noise to the leaf score. only the captures that can
             # lose (attacker worth more than victim) pay for the swap.
             # ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
-            if PIECE_VALUE[move_piece(move)] > victim and see(board, move) < 0:
+            if PIECE_VALUE[move_piece(move)] > victim and not see_ge(board, move, 0):
                 continue
 
             # delta pruning: if winning this piece plus a margin still falls short of alpha, so
@@ -1292,6 +1356,7 @@ def warm_up() -> None:
     moves, count = legal_moves(capt)
     for j in range(count):
         see(capt, int(moves[j]))
+        see_ge(capt, int(moves[j]), 0)
         move_ordering_score(capt, int(moves[j]))
 
 

@@ -1,6 +1,12 @@
 """Checks the jitted static exchange evaluation against the plain-Python one it mirrors: for
 every capture in every position of some random games, agent.see must equal reference.see.
 
+see_ge is checked two ways: the jitted and plain ports must return the same bool at every
+threshold, and at threshold 0 - the only one the engine actually uses - see_ge must equal
+(see >= 0). It is the Stockfish running-balance form, which is deliberately not identical to
+(see >= t) at arbitrary t (the defender is assumed to keep recapturing), so we do not hold it
+to that.
+
 Same idea as verify_movegen - walk varied positions with python-chess, then compare the two
 implementations move for move. SEE is pure arithmetic over the attack tables, so an exact match
 is the bar; any divergence is a bug in one side.
@@ -67,6 +73,19 @@ def main() -> None:
                 if got != want:
                     mismatches += 1
                     print(f"MISMATCH {mv.uci()}  agent={got} reference={want}\n  {board.fen()}")
+
+                # the two ports must agree at every threshold; at 0 - all the engine uses -
+                # see_ge must also equal (see >= 0)
+                for t in (want - 1, want, want + 1, -900, -100, 0, 100, 900):
+                    a_ge = agent.see_ge(pos, packed, t)
+                    r_ge = reference.see_ge(board, mv, t)
+                    if a_ge != r_ge:
+                        mismatches += 1
+                        print(f"SEE_GE PORTS {mv.uci()} t={t}  agent={a_ge} reference={r_ge}"
+                              f"\n  {board.fen()}")
+                    if t == 0 and a_ge != (want >= 0):
+                        mismatches += 1
+                        print(f"SEE_GE@0 {mv.uci()}  see_ge={a_ge} (see={want})\n  {board.fen()}")
 
             board.push(random.choice(moves))
 

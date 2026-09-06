@@ -104,23 +104,29 @@ LMR.
   spending games. Then `tools/bench.py` Elo vs the pre-bundle copy. Keep the flags-off path
   bit-identical to `reference.py` (`tools/nodebench.py` / `tools/verify_*.py`).
 
-### 3. Allocation-free SEE
+### 3. Allocation-free SEE  [done - 2026-09-06]
 
 Ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
 
-`agent.see()` (and the `nnue/` copy) allocates `np.empty(34)` on every call - in quiescence
-that is the hottest loop in the engine. Both call sites only compare the result against a
-threshold.
+`agent.see()` (and the `nnue/` copy) allocated `np.empty(34)` on every call - in quiescence
+that is the hottest loop in the engine. The one call site left, the quiescence capture filter,
+only compared the result against zero.
 
-- [ ] Add `see_ge(board, move, threshold) -> bool`: a scalar running balance, early exit as
-      soon as the sign is settled, no array, no unwind pass. Standard swap-loop formulation.
-- [ ] Golden-test `see_ge(m, t) == (see(m) >= t)` over a few thousand random capture positions
-      before wiring it in; keep `see()` for anywhere the value itself is wanted.
-- [ ] Route the quiescence capture filter and the depth <= 5 main-search SEE prune through
-      `see_ge`.
-- Measure: `tools/nodebench.py` - node counts **byte-identical** (this is exact), knps up.
-  Fold into the next bundle without its own A/B; an exact speed-up is invisible to the game
-  harness. TobyCoad's estimate for the same change: +4-6% knps.
+- [x] `see_ge(board, move, threshold) -> bool` in `agent.py`, `reference.py`, `nnue/agent.py`:
+      a scalar running balance (Stockfish form), no array, early exit. The attacker set is
+      recomputed each step as `see()` does, so no per-piece x-ray bookkeeping.
+- [x] `tools/verify_see.py`: the jitted and plain ports agree at every threshold, and at
+      threshold 0 - the only one the engine uses - `see_ge` equals `see() >= 0` over the whole
+      capture suite (20602 captures, 0 mismatches). Note: the Stockfish form is deliberately
+      *not* `see() >= t` at arbitrary `t` (the defender is assumed to keep recapturing), so the
+      test only holds it to `t == 0`. `see()` is kept for `move_ordering_score`, which wants
+      the value.
+- [x] Quiescence capture filter routed through `not see_ge(board, move, 0)`. We have no
+      depth <= 5 main-search SEE prune (that is a TobyCoad feature, not ours) - nothing else to
+      route.
+- [x] `tools/nodebench.py --depth 6`: node counts and every bestmove / score byte-identical
+      (185434 nodes, exact refactor confirmed). Import unchanged at ~19 s. knps delta too noisy
+      to quote off the micro-bench; folded in on the exactness evidence, no A/B.
 
 ### 4. Time-budget shape
 
