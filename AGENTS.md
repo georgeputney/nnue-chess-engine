@@ -22,18 +22,19 @@ and they change, so fetch them before you rely on a number.
 - Your colour is the side to move in the fen. There is no other input.
 - The process starts once per game and stays alive between your moves. Module state survives to
   your next move in the same game, never to the next game.
-- Import time has a 90 second budget before the clock starts. Load weights there.
+- Import time has a 90 second budget before the clock starts. Load weights there. The budget
+  covers import only; work you defer to the first `get_move` comes out of your match clock.
 - 120 s + 0.5 s per move, per side, on wall time. One core of an AMD EPYC 9V74 at 2.60 GHz, 2 GB,
   no network, no GPU.
-- Illegal move, malformed output, crash, out of memory, or flag fall loses that game. A move
-  reply over 4 KB counts as illegal. 300 plies without a result goes to material adjudication.
+- Illegal move, malformed output, crash, out of memory, or flag fall loses that game. A flag
+  against a side that cannot mate is a draw, not a loss. 600 plies without a result is a draw.
+- The referee claims threefold and fifty-move draws automatically. To dodge a repetition you did
+  not intend, track the positions you have been asked about; you cannot decline the claim.
 - Everything in the zip together stays under 50 MB unzipped.
 - Ten uploads per team per day, and the latest one that passed validation is the one that plays.
-- Rated games start from curated opening positions, not the standard start. The set is not
-  published.
+- Rated games start from curated opening positions close to level, not the standard start.
 - Your process is suspended while the opponent thinks, so nothing you leave running between your
-  own moves gets any CPU. Do your searching inside `get_move`. Two of your games can run at once,
-  in separate containers.
+  own moves gets any CPU. Do your searching inside `get_move`.
 
 ## Things that break agents here
 
