@@ -72,6 +72,45 @@ _ROOK_HOME_TO_CASTLE_FLAG = {
     0: WHITE_QUEENSIDE, 7: WHITE_KINGSIDE, 56: BLACK_QUEENSIDE, 63: BLACK_KINGSIDE,
 }
 
+# Squares strictly between two collinear squares, and the whole board line running through
+# them - both 0 for a pair that shares no rank, file, or diagonal. Built once here in plain
+# Python (a 64x64 pair of tables, 64 KB) and frozen into numpy arrays for the jitted legality
+# check. They are what let legal_moves() rule on a move without making it: a pinned piece may
+# only travel along _LINE[king][piece], and a single check is answered only on the checker's
+# square or _BETWEEN[king][checker].
+_DIRECTIONS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+_BETWEEN = [[0] * 64 for _ in range(64)]
+_LINE = [[0] * 64 for _ in range(64)]
+for _from in range(64):
+    _ff, _fr = _from & 7, _from >> 3
+    for _df, _dr in _DIRECTIONS:
+        _ray: list[int] = []
+        _f, _r = _ff, _fr
+        while 0 <= _f < 8 and 0 <= _r < 8:
+            _ray.append(_r * 8 + _f)
+            _f, _r = _f + _df, _r + _dr
+        _line_bb = 0
+        for _s in _ray:
+            _line_bb |= 1 << _s
+        _f, _r = _ff - _df, _fr - _dr
+        while 0 <= _f < 8 and 0 <= _r < 8:
+            _line_bb |= 1 << (_r * 8 + _f)
+            _f, _r = _f - _df, _r - _dr
+        for _i in range(1, len(_ray)):
+            _between_bb = 0
+            for _j in range(1, _i):
+                _between_bb |= 1 << _ray[_j]
+            _BETWEEN[_from][_ray[_i]] = _between_bb
+            _LINE[_from][_ray[_i]] = _line_bb
+
+_BETWEEN_NB = np.zeros((64, 64), dtype=np.uint64)
+_LINE_NB = np.zeros((64, 64), dtype=np.uint64)
+for _a in range(64):
+    for _b in range(64):
+        _BETWEEN_NB[_a, _b] = np.uint64(_BETWEEN[_a][_b])
+        _LINE_NB[_a, _b] = np.uint64(_LINE[_a][_b])
+
 
 def is_attacked_reference(pos: Board, sq: int, by_colour: int) -> bool:
     """Is `sq` attacked by any of `by_colour`'s pieces, on the position as it stands?"""
@@ -547,17 +586,103 @@ def make_move(pos: Board, move: int) -> Board:
 
 
 @njit(cache=True)
+def _attacked_by_with_occ(pos: Board, sq: int, by_colour: int, occ: int) -> bool:
+    """is_attacked, but on a caller-supplied occupancy. Used to test a king's destination with
+    the king lifted off the board, so it cannot shield the square it is fleeing along."""
+    opp = 1 - by_colour
+    if PAWN_ATTACKS_NB[opp, sq] & pos.pieces[by_colour, PAWN]:
+        return True
+    if KNIGHT_ATTACKS_NB[sq] & pos.pieces[by_colour, KNIGHT]:
+        return True
+    if KING_ATTACKS_NB[sq] & pos.pieces[by_colour, KING]:
+        return True
+    bishops_queens = pos.pieces[by_colour, BISHOP] | pos.pieces[by_colour, QUEEN]
+    if bishop_attacks(nb.uint8(sq), occ) & bishops_queens:  # type: ignore[arg-type]
+        return True
+    rooks_queens = pos.pieces[by_colour, ROOK] | pos.pieces[by_colour, QUEEN]
+    return bool(rook_attacks(nb.uint8(sq), occ) & rooks_queens)  # type: ignore[arg-type]
+
+
+@njit(cache=True)
 def legal_moves(pos: Board) -> tuple[np.ndarray, int]:
+    """Legal moves, decided without playing them: compute once per position which enemy pieces
+    check the king (so non-king moves must capture the checker or block between it and the king)
+    and which of our pieces are pinned (so they may only slide along the pin line). Every move
+    that isn't a king move or an en passant then passes with two bitboard tests and no make_move.
+    En passant - rare, and the one case a rank-skewer pin can hide - keeps the make-and-test."""
     pseudo, pseudo_count = _pseudo_legal_moves(pos)
-    mover = pos.side
+
+    us = pos.side
+    them = 1 - us
+    occ = pos.occupancy[2]
+    own_occ = pos.occupancy[us]
+    enemy_occ = pos.occupancy[them]
+    ksq = lsb_index(pos.pieces[us, KING])
+
+    bishops_queens = pos.pieces[them, BISHOP] | pos.pieces[them, QUEEN]
+    rooks_queens = pos.pieces[them, ROOK] | pos.pieces[them, QUEEN]
+
+    checkers = KNIGHT_ATTACKS_NB[ksq] & pos.pieces[them, KNIGHT]
+    checkers |= PAWN_ATTACKS_NB[us, ksq] & pos.pieces[them, PAWN]
+    checkers |= bishop_attacks(nb.uint8(ksq), occ) & bishops_queens  # type: ignore[arg-type]
+    checkers |= rook_attacks(nb.uint8(ksq), occ) & rooks_queens  # type: ignore[arg-type]
+
+    double_check = False
+    if checkers == 0:
+        block_mask = nb.uint64(FULL_BB)
+    elif checkers & (checkers - nb.uint64(1)) == 0:
+        block_mask = checkers | _BETWEEN_NB[ksq, lsb_index(checkers)]
+    else:
+        block_mask = nb.uint64(0)
+        double_check = True
+
+    # a piece is pinned when an enemy slider's path to the king is blocked by it alone
+    pinned = nb.uint64(0)
+    snipers = rook_attacks(nb.uint8(ksq), enemy_occ) & rooks_queens  # type: ignore[arg-type]
+    snipers |= bishop_attacks(nb.uint8(ksq), enemy_occ) & bishops_queens  # type: ignore[arg-type]
+    while snipers:
+        sniper_sq = lsb_index(snipers)
+        snipers &= snipers - nb.uint64(1)
+        blockers = _BETWEEN_NB[ksq, sniper_sq] & occ
+        if blockers != 0 and blockers & (blockers - nb.uint64(1)) == 0 and blockers & own_occ:
+            pinned |= blockers
 
     legal = np.empty(MAX_MOVES, dtype=np.int64)
     legal_count = 0
     for i in range(pseudo_count):
         move = pseudo[i]
-        if not is_check(make_move(pos, move), mover):  # type: ignore[arg-type, type-var, call-arg]
-            legal[legal_count] = move
-            legal_count += 1
+        piece = move_piece(move)
+        frm = move_from_square(move)
+        to = move_to_square(move)
+
+        if piece == KING:
+            if move_is_castle(move):
+                legal[legal_count] = move  # _castling_moves_nb proved every square safe already
+                legal_count += 1
+                continue
+            test_occ = occ ^ bit(ksq)
+            if move_is_capture(move):
+                test_occ &= clear_mask(to)
+            if not _attacked_by_with_occ(pos, to, them, test_occ):  # type: ignore[arg-type]
+                legal[legal_count] = move
+                legal_count += 1
+            continue
+
+        if double_check:
+            continue
+
+        if move_is_en_passant(move):
+            if not is_check(make_move(pos, move), us):  # type: ignore[arg-type, type-var, call-arg]
+                legal[legal_count] = move
+                legal_count += 1
+            continue
+
+        if bit(to) & block_mask == 0:
+            continue
+        if bit(frm) & pinned and bit(to) & _LINE_NB[ksq, frm] == 0:
+            continue
+        legal[legal_count] = move
+        legal_count += 1
 
     return legal, legal_count
 
@@ -568,6 +693,11 @@ def legal_moves(pos: Board) -> tuple[np.ndarray, int]:
 _warm_pos = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 is_attacked(_warm_pos, 4, WHITE)
 is_check(_warm_pos, WHITE)
+_attacked_by_with_occ(_warm_pos, 4, BLACK, int(_warm_pos.occupancy[2]))
 _warm_moves, _warm_count = _pseudo_legal_moves(_warm_pos)
 _warm_legal, _warm_legal_count = legal_moves(_warm_pos)
 make_move(_warm_pos, int(_warm_moves[0]))  # type: ignore[type-var, call-arg]
+# a position with our king in check and a friendly piece pinned, so legal_moves compiles its
+# check-evasion and pin branches now rather than on the first such position in a real game
+legal_moves(parse_fen("4r3/8/8/8/8/8/4N3/4K3 w - - 0 1"))
+legal_moves(parse_fen("rnbqkbnr/ppp1p1pp/3p4/4Pp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3"))
