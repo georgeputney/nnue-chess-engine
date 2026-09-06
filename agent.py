@@ -863,24 +863,3 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     board.zobrist = np.uint64(zobrist_hash(board))
     move, score = search_root(_STATE, board, depth, -MATE_SCORE, MATE_SCORE, NO_MOVE)
     return move_uci(int(move)), int(score), int(_STATE.nodes)
-
-
-# Spend the platform's init budget searching the opening position, filling the transposition
-# table before the game clock starts (it persists across a game). AGENT_WARM_UP_S overrides the
-# seconds; tools that spawn a process per game set it to 0.
-WARM_UP_S = float(os.environ.get("AGENT_WARM_UP_S", "40.0"))
-
-
-def _warm_up() -> None:
-    board = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-    board.zobrist = np.uint64(zobrist_hash(board))
-    moves, _count = legal_moves(board)
-    search_root(_STATE, board, 2, -MATE_SCORE, MATE_SCORE, NO_MOVE)  # compile the search
-    if WARM_UP_S > 0:
-        now = time.monotonic()
-        _STATE.nodes = 0
-        _STATE.aborted = 0
-        deepen(board, now, now + WARM_UP_S, WARM_UP_S, int(moves[0]))
-
-
-_warm_up()
