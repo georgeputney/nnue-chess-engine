@@ -24,7 +24,7 @@ import agent  # noqa: E402
 import reference  # noqa: E402
 from tools.bench import OPENINGS  # noqa: E402
 
-PIECE_CP = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+PLY_CAP = 600
 
 
 def _reset() -> None:
@@ -43,20 +43,28 @@ def _reset() -> None:
     reference.PLAYED.clear()
 
 
-def _material(board: chess.Board) -> int:
-    return sum(
-        (len(board.pieces(pt, chess.WHITE)) - len(board.pieces(pt, chess.BLACK))) * cp
-        for pt, cp in PIECE_CP.items()
-    )
-
-
 def _play(fen: str, bb_white: bool, base_ms: int, inc_ms: int) -> tuple[float, str]:
     """Returns (points for bb, termination)."""
     board = chess.Board(fen)
     clock = {chess.WHITE: float(base_ms), chess.BLACK: float(base_ms)}
     _reset()
 
-    while board.outcome(claim_draw=True) is None and board.fullmove_number < 200:
+    while True:
+        outcome = board.outcome()
+        if outcome is not None:
+            result = 0.5 if outcome.winner is None else float(outcome.winner == chess.WHITE)
+            term = outcome.termination.name.lower()
+            break
+        if board.is_repetition(3):
+            result, term = 0.5, "threefold_repetition"
+            break
+        if board.is_fifty_moves():
+            result, term = 0.5, "fifty_moves"
+            break
+        if board.ply() >= PLY_CAP:
+            result, term = 0.5, "ply_cap"
+            break
+
         stm = board.turn
         use_bb = (stm == chess.WHITE) == bb_white
         mover = agent.get_move if use_bb else reference.get_move
@@ -66,6 +74,9 @@ def _play(fen: str, bb_white: bool, base_ms: int, inc_ms: int) -> tuple[float, s
         clock[stm] -= (time.monotonic() - t0) * 1000.0
 
         if clock[stm] < 0:
+            # a flag against a side that cannot mate is a draw, not a loss
+            if board.has_insufficient_material(not stm):
+                return 0.5, "flag (drawn)"
             return (1.0 if use_bb else 0.0), "flag (opponent)" if use_bb else "flag (bb)"
         clock[stm] += inc_ms
 
@@ -77,17 +88,6 @@ def _play(fen: str, bb_white: bool, base_ms: int, inc_ms: int) -> tuple[float, s
             return (1.0 if use_bb else 0.0), "illegal (opp)" if use_bb else "illegal (bb)"
 
         board.push(move)
-
-    outcome = board.outcome(claim_draw=True)
-    if outcome is None:
-        margin = _material(board)
-        result = 1.0 if margin > 0 else 0.0 if margin < 0 else 0.5
-        term = "adjudication"
-    elif outcome.winner is None:
-        result, term = 0.5, outcome.termination.name.lower()
-    else:
-        result = 1.0 if outcome.winner == chess.WHITE else 0.0
-        term = outcome.termination.name.lower()
 
     bb_points = result if bb_white else 1.0 - result
     return bb_points, term
