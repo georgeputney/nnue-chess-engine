@@ -168,6 +168,89 @@ def pawns_ahead(square: chess.Square, colour: chess.Color, own_pawns: chess.Bitb
     return popcount(ahead & own_pawns)
 
 
+# flat values for the SEE capture swap: PIECE_VALUE plus a huge king, so a king only ever ends
+# up as the last capturer (the swap folds out any line the far side could answer). agent.SEE_VALUE.
+SEE_VALUE: dict[chess.PieceType, int] = {**PIECE_VALUE, chess.KING: 30_000}
+
+
+# Every piece of either colour attacking `square` for occupancy `occupied` - chess.Board.attackers
+# widened to both colours and taking an explicit occupancy, so clearing a piece's bit uncovers
+# the x-ray slider behind it. agent.attackers_to.
+# ref: https://www.chessprogramming.org/Square_Attacked_By
+def attackers_to(
+    board: chess.Board, square: chess.Square, occupied: chess.Bitboard
+) -> chess.Bitboard:
+    bishops = board.bishops | board.queens
+    rooks = board.rooks | board.queens
+    white_pawns = board.pawns & board.occupied_co[chess.WHITE]
+    black_pawns = board.pawns & board.occupied_co[chess.BLACK]
+    return occupied & (
+        (chess.BB_KNIGHT_ATTACKS[square] & board.knights)
+        | (chess.BB_KING_ATTACKS[square] & board.kings)
+        | (chess.BB_PAWN_ATTACKS[chess.BLACK][square] & white_pawns)
+        | (chess.BB_PAWN_ATTACKS[chess.WHITE][square] & black_pawns)
+        | (chess.BB_DIAG_ATTACKS[square][chess.BB_DIAG_MASKS[square] & occupied] & bishops)
+        | (chess.BB_RANK_ATTACKS[square][chess.BB_RANK_MASKS[square] & occupied] & rooks)
+        | (chess.BB_FILE_ATTACKS[square][chess.BB_FILE_MASKS[square] & occupied] & rooks)
+    )
+
+
+# Static exchange evaluation: the material board.turn wins or loses if the capture `move` is met
+# by the best recapture sequence on its square, cheapest attacker first, either side free to
+# stop once continuing would lose. The swap algorithm, attacker set recomputed each step so a
+# revealed x-ray slider joins in. agent.see.
+# ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
+def see(board: chess.Board, move: chess.Move) -> int:
+    to = move.to_square
+    occ = board.occupied & ~chess.BB_SQUARES[move.from_square]
+
+    if board.is_en_passant(move):
+        occ &= ~chess.BB_SQUARES[to + (-8 if board.turn == chess.WHITE else 8)]
+        captured_value = SEE_VALUE[chess.PAWN]
+    else:
+        victim = board.piece_at(to)
+        captured_value = SEE_VALUE[victim.piece_type] if victim else 0
+
+    from_piece = board.piece_at(move.from_square)
+    gain = [captured_value]
+    last_value = SEE_VALUE[from_piece.piece_type] if from_piece else 0  # our piece now on `to`
+    side = not board.turn
+    attackers = attackers_to(board, to, occ)
+    d = 0
+
+    while True:
+        mine = attackers & board.occupied_co[side] & occ
+        found_sq = -1
+        found_pt = 0
+        for piece_type in range(chess.PAWN, chess.KING + 1):  # least valuable attacker still up
+            subset = mine & board.pieces_mask(piece_type, side)
+            if subset:
+                found_sq = chess.lsb(subset)
+                found_pt = piece_type
+                break
+        if found_sq < 0:
+            break
+        if found_pt == chess.KING and attackers & board.occupied_co[not side] & occ:
+            break  # a king can only recapture a square the far side no longer attacks
+
+        d += 1
+        gain.append(last_value - gain[d - 1])
+        if max(-gain[d - 1], gain[d]) < 0:  # recapturing and standing pat both lose: stop
+            break
+
+        last_value = SEE_VALUE[found_pt]
+        occ &= ~chess.BB_SQUARES[found_sq]
+        attackers = attackers_to(board, to, occ)
+        side = not side
+        if d >= 32:
+            break
+
+    while d > 0:
+        d -= 1
+        gain[d] = -max(-gain[d], gain[d + 1])
+    return gain[0]
+
+
 # Squares a queen on `square` would attack through `occupied` - used from the king's square
 # as a king-exposure proxy. board.attacks() only does the piece actually on the square.
 def slider_scope(square: chess.Square, occupied: chess.Bitboard) -> int:
@@ -287,7 +370,9 @@ def update_history(board: chess.Board, move: chess.Move, bonus: int) -> None:
 
 
 # Ordering score so the likely-best moves are tried first: captures before quiet moves, and
-# among captures the most valuable victim taken by the least valuable attacker (MVV-LVA).
+# among captures the most valuable victim taken by the least valuable attacker (MVV-LVA). A
+# capture that loses material to the recaptures (negative SEE) is scored by that SEE instead,
+# dropping it below every quiet.
 # ref: https://www.chessprogramming.org/MVV-LVA
 def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
     score = 0
@@ -300,11 +385,18 @@ def move_ordering_score(board: chess.Board, move: chess.Move) -> int:
         if victim is not None:
             score = PIECE_VALUE[victim.piece_type]
 
-    # most valuable victim, least valuable attacker. the * 16 keeps every capture ranked
-    # above every quiet move.
     if score:
         attacker = board.piece_at(move.from_square)
-        score = score * 16 - (PIECE_VALUE.get(attacker.piece_type, 0) if attacker else 0)
+        attacker_value = PIECE_VALUE.get(attacker.piece_type, 0) if attacker else 0
+        # only the "wrong way round" captures can lose material; SEE the rest so an even or
+        # winning trade keeps its MVV-LVA rank without paying for the swap.
+        if attacker_value > score:
+            exchange = see(board, move)
+            if exchange < 0:
+                return exchange
+        # most valuable victim, least valuable attacker. the * 16 keeps every capture ranked
+        # above every quiet move.
+        score = score * 16 - attacker_value
 
     # promotions are usually worth trying early
     if move.promotion:
@@ -677,8 +769,6 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
     best_move: chess.Move | None = None
 
     for move in moves:
-        # delta pruning: if winning this piece plus a margin still falls short of alpha,
-        # so does every smaller capture after it (list is biggest-victim first)
         if not in_check and not move.promotion:
             if board.is_en_passant(move):
                 victim = PIECE_VALUE[chess.PAWN]
@@ -686,6 +776,17 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
                 piece = board.piece_at(move.to_square)
                 victim = PIECE_VALUE[piece.piece_type] if piece else 0
 
+            # skip a capture that loses material once the recaptures are counted - not worth a
+            # qsearch node, and it only adds noise to the leaf score. only the captures that can
+            # lose (attacker worth more than victim) pay for the swap.
+            # ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
+            attacker = board.piece_at(move.from_square)
+            attacker_value = PIECE_VALUE.get(attacker.piece_type, 0) if attacker else 0
+            if attacker_value > victim and see(board, move) < 0:
+                continue
+
+            # delta pruning: if winning this piece plus a margin still falls short of alpha,
+            # so does every smaller capture after it (list is biggest-victim first)
             if standing_pat + victim + DELTA_PRUNING_MARGIN < alpha:
                 break
 

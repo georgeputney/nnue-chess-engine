@@ -79,11 +79,19 @@ from numba.experimental import jitclass
 
 import reference
 import tables
-from attacks import bishop_attacks, queen_attacks, rook_attacks
-from bitboard import BISHOP, KING, NO_SQUARE, QUEEN, ROOK, WHITE, lsb_index
+from attacks import (
+    KING_ATTACKS_NB,
+    KNIGHT_ATTACKS_NB,
+    PAWN_ATTACKS_NB,
+    bishop_attacks,
+    queen_attacks,
+    rook_attacks,
+)
+from bitboard import BISHOP, BLACK, KING, KNIGHT, NO_SQUARE, PAWN, QUEEN, ROOK, WHITE, lsb_index
 from board import Board, copy_board, parse_fen
 from move import (
     PROMOTION_NONE,
+    move_from_square,
     move_is_capture,
     move_is_en_passant,
     move_piece,
@@ -107,6 +115,11 @@ FAR_PAWN = 0
 # (pawn 0 .. king 5), king 0 since it is never a victim.
 # ref: https://www.chessprogramming.org/Point_Value
 PIECE_VALUE = np.array((100, 320, 330, 500, 900, 0), dtype=np.int64)
+
+# flat values for the SEE capture swap, indexed the same way. the king is huge, not zero: it can
+# only ever be the last capturer (the swap folds out any line where the far side could recapture
+# it), and the sentinel is what makes that fall out.  reference.SEE_VALUE.
+SEE_VALUE = np.array((100, 320, 330, 500, 900, 30_000), dtype=np.int64)
 
 # sentinel beyond any reachable material total; +MATE_SCORE = we deliver mate, -MATE_SCORE = we
 # are mated. a score past MATE_THRESHOLD in magnitude encodes a forced mate MATE_SCORE - |score|
@@ -364,8 +377,96 @@ def piece_on(board: Board, square: int) -> int:
             for pt in range(6):
                 if board.pieces[colour, pt] & b:
                     return pt
-                
+
     return -1
+
+
+# Every piece of either colour attacking `square`, given occupancy `occ`. is_attacked widened to
+# the whole attacker set and taking an explicit occupancy, so clearing a piece's bit uncovers
+# the x-ray slider behind it. reference.attackers_to (chess.Board.attackers).
+# ref: https://www.chessprogramming.org/Square_Attacked_By
+@njit(cache=True)
+def attackers_to(board: Board, square: int, occ: int) -> int:
+    sq = np.uint8(square)
+    knights = board.pieces[0, KNIGHT] | board.pieces[1, KNIGHT]
+    kings = board.pieces[0, KING] | board.pieces[1, KING]
+    bishops_queens = board.pieces[0, BISHOP] | board.pieces[1, BISHOP] \
+        | board.pieces[0, QUEEN] | board.pieces[1, QUEEN]
+    rooks_queens = board.pieces[0, ROOK] | board.pieces[1, ROOK] \
+        | board.pieces[0, QUEEN] | board.pieces[1, QUEEN]
+
+    result = KNIGHT_ATTACKS_NB[square] & knights
+    result |= KING_ATTACKS_NB[square] & kings
+    result |= PAWN_ATTACKS_NB[BLACK, square] & board.pieces[0, PAWN]  # white pawns hitting here
+    result |= PAWN_ATTACKS_NB[WHITE, square] & board.pieces[1, PAWN]  # black pawns hitting here
+    result |= bishop_attacks(sq, occ) & bishops_queens
+    result |= rook_attacks(sq, occ) & rooks_queens
+    return result & occ
+
+
+# Static exchange evaluation: the material `board.side` wins or loses if the capture `move` is
+# met by the best sequence of recaptures on its square, cheapest attacker first, either side
+# free to stop once continuing would lose. No search, no make-move. The swap algorithm, with the
+# attacker set recomputed each step so a revealed x-ray slider joins in. reference.see.
+# ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
+@njit(cache=True)
+def see(board: Board, move: int) -> int:
+    to = move_to_square(move)
+    one = np.uint64(1)
+    occ = board.occupancy[2] ^ (one << np.uint8(move_from_square(move)))
+
+    if move_is_en_passant(move):
+        captured = to - 8 if board.side == WHITE else to + 8  # the pawn is behind the ep square
+        occ ^= one << np.uint8(captured)
+        captured_value = SEE_VALUE[PAWN]
+    else:
+        victim = piece_on(board, to)
+        captured_value = SEE_VALUE[victim] if victim >= 0 else 0
+
+    gain = np.empty(34, dtype=np.int64)
+    gain[0] = captured_value
+    last_value = SEE_VALUE[move_piece(move)]  # our piece now standing on `to`
+    side = 1 - board.side                     # the side to recapture next
+    atk = attackers_to(board, to, occ)
+    d = 0
+
+    while True:
+        found = -1
+        found_pt = 0
+        for pt in range(6):                   # this side's least valuable attacker still standing
+            subset = atk & board.pieces[side, pt] & occ
+            if subset:
+                found = lsb_index(subset)
+                found_pt = pt
+                break
+        if found < 0:
+            break
+        if found_pt == KING:
+            # a king can only recapture onto a square the far side no longer attacks
+            answered = False
+            for pt in range(6):
+                if atk & board.pieces[1 - side, pt] & occ:
+                    answered = True
+                    break
+            if answered:
+                break
+
+        d += 1
+        gain[d] = last_value - gain[d - 1]     # material for `side` if it recaptures here
+        if max(-gain[d - 1], gain[d]) < 0:     # recapturing and standing pat both lose: stop
+            break
+
+        last_value = SEE_VALUE[found_pt]
+        occ ^= one << np.uint8(found)
+        atk = attackers_to(board, to, occ)     # a slider behind `found` may now bear on `to`
+        side = 1 - side
+        if d >= 32:
+            break
+
+    while d > 0:
+        d -= 1
+        gain[d] = -max(-gain[d], gain[d + 1])
+    return gain[0]
 
 
 # A quiet move's cutoff tally for the side about to play it (reference.history_score).
@@ -389,20 +490,30 @@ def update_history(state: SearchState, board: Board, move: int, bonus: int) -> N
 
 
 # Ordering score, highest first: captures before quiets, and among captures the most valuable
-# victim taken by the least valuable attacker (MVV-LVA), plus a promotion bonus.
-# reference.move_ordering_score.  ref: https://www.chessprogramming.org/MVV-LVA
+# victim taken by the least valuable attacker (MVV-LVA), plus a promotion bonus. A capture that
+# loses material to the recapture sequence (negative SEE) is scored by that SEE instead, which
+# drops it below every quiet. reference.move_ordering_score.
+# ref: https://www.chessprogramming.org/MVV-LVA
 @njit(cache=True)
 def move_ordering_score(board: Board, move: int) -> int:
     if move_is_en_passant(move):
+        victim = PAWN
         score = 100
     else:
         victim = piece_on(board, move_to_square(move))
         score = PIECE_VALUE[victim] if victim >= 0 else 0
 
-    # most valuable victim, least valuable attacker. the * 16 keeps every capture above every
-    # quiet move.
     if score:
-        score = score * 16 - PIECE_VALUE[move_piece(move)]
+        attacker = move_piece(move)
+        # only the "wrong way round" captures can lose material; SEE the rest so an even or
+        # winning trade keeps its MVV-LVA rank without paying for the swap.
+        if PIECE_VALUE[attacker] > PIECE_VALUE[victim]:
+            exchange = see(board, move)
+            if exchange < 0:
+                return exchange
+        # most valuable victim, least valuable attacker. the * 16 keeps every capture above
+        # every quiet move.
+        score = score * 16 - PIECE_VALUE[attacker]
 
     promo = move_promotion(move)
     if promo != PROMOTION_NONE:
@@ -858,8 +969,7 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
 
     for r in range(n):
         move = moves[ranked[r]]
-        # delta pruning: if winning this piece plus a margin still falls short of alpha, so
-        # does every smaller capture after it (list is biggest-victim first)
+
         if not in_check and move_promotion(move) == PROMOTION_NONE:
             if move_is_en_passant(move):
                 victim = 100
@@ -867,6 +977,15 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
                 v = piece_on(board, move_to_square(move))
                 victim = PIECE_VALUE[v] if v >= 0 else 0
 
+            # skip a capture that loses material once the recaptures are counted: it isn't worth
+            # a qsearch node and it only adds noise to the leaf score. only the captures that can
+            # lose (attacker worth more than victim) pay for the swap.
+            # ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
+            if PIECE_VALUE[move_piece(move)] > victim and see(board, move) < 0:
+                continue
+
+            # delta pruning: if winning this piece plus a margin still falls short of alpha, so
+            # does every smaller capture after it (list is biggest-victim first)
             if standing_pat + victim + DELTA_PRUNING_MARGIN < alpha:
                 break
 
@@ -1102,6 +1221,12 @@ def warm_up() -> None:
     board = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
     board.zobrist = np.uint64(zobrist_hash(board))
     search_root(STATE, board, 4, -MATE_SCORE, MATE_SCORE, NO_MOVE)
+    # a position with captures on the board so see / attackers_to compile here, not on the clock
+    capt = parse_fen("r1bqkbnr/ppp2ppp/2n5/1B1pp3/3PP3/5N2/PPP2PPP/RNBQK2R w KQkq - 0 4")
+    moves, count = legal_moves(capt)
+    for j in range(count):
+        see(capt, int(moves[j]))
+        move_ordering_score(capt, int(moves[j]))
 
 
 warm_up()
