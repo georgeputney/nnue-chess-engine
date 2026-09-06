@@ -10,6 +10,7 @@ nopython-safe form of `lsb_square`.
 from collections.abc import Iterator
 
 import numba as nb
+import numpy as np
 from numba import njit
 
 FULL_BB = (1 << 64) - 1
@@ -96,20 +97,30 @@ def scan_forward(bb: int) -> Iterator[int]:
 
 
 # lsb_square's numba-callable twin: nopython mode can't call .bit_length() (that's a Python int
-# method, not something numba's native integer types support), so this counts trailing zero
-# bits with a plain loop instead - correct, if not the fastest possible way to do it. Every
-# jitted function elsewhere that needs to walk set bits one at a time calls this directly rather
-# than trying to use the scan_forward generator above, which nopython mode can't compile either.
+# method, not something numba's native integer types support). Isolating the low bit with
+# bb & -bb leaves a single power of two 2**k; multiplying the fixed de Bruijn constant by it
+# rotates a distinct 6-bit pattern for each k into the top bits, and DEBRUIJN_LSB_INDEX maps
+# that pattern back to k. O(1), where the shift-until-odd loop it replaced cost one iteration
+# per trailing zero. Every jitted function elsewhere that walks set bits one at a time calls
+# this directly; the scan_forward generator above is not something nopython mode can compile.
+# ref: https://www.chessprogramming.org/BitScan#De_Bruijn_Multiplication
+DEBRUIJN64 = np.uint64(0x03F79D71B4CB0A89)
+DEBRUIJN_LSB_INDEX = np.array((
+    0, 1, 48, 2, 57, 49, 28, 3,
+    61, 58, 50, 42, 38, 29, 17, 4,
+    62, 55, 59, 36, 53, 51, 43, 22,
+    45, 39, 33, 30, 24, 18, 12, 5,
+    63, 47, 56, 27, 60, 41, 37, 16,
+    54, 35, 52, 21, 44, 32, 23, 11,
+    46, 26, 40, 15, 34, 20, 31, 10,
+    25, 14, 19, 9, 13, 8, 7, 6,
+), dtype=np.uint8)
+
+
 @njit(nb.uint8(nb.uint64), cache=True)
 def lsb_index(bb: int) -> int:
-    idx = nb.uint8(0)
-    one = nb.uint64(1)
-
-    while (bb & one) == 0:
-        bb >>= one  # type: ignore[assignment]  # numba's own uint64, not numpy's
-        idx += nb.uint8(1)
-        
-    return idx  # type: ignore[return-value]  # numba unboxes uint8 back to plain int
+    isolated = bb & (nb.uint64(0) - bb)
+    return int(DEBRUIJN_LSB_INDEX[(isolated * DEBRUIJN64) >> nb.uint64(58)])
 
 
 # compile now, inside the init budget, not on the first real call

@@ -80,7 +80,7 @@ from numba.experimental import jitclass
 import reference
 import tables
 from attacks import bishop_attacks, queen_attacks, rook_attacks
-from bitboard import BISHOP, KING, NO_SQUARE, QUEEN, ROOK, WHITE
+from bitboard import BISHOP, KING, NO_SQUARE, QUEEN, ROOK, WHITE, lsb_index
 from board import Board, copy_board, parse_fen
 from move import (
     PROMOTION_NONE,
@@ -231,23 +231,19 @@ class SearchState:
 STATE = SearchState()
 
 
-# chess.popcount / lsb, jitted: nopython mode has no int.bit_count() or int.bit_length().
+# chess.popcount, jitted: nopython mode has no int.bit_count(). The SWAR form sums set bits in
+# parallel - pairwise, then nibble-wise, then a multiply that gathers every byte's subtotal into
+# the top one - in a fixed handful of ops, where the clear-lowest-bit loop it replaced cost one
+# iteration per set bit.
+# ref: https://www.chessprogramming.org/Population_Count#SWAR-Popcount
 @njit(cache=True)
 def popcount(bb: int) -> int:
-    count = 0
-    while bb:
-        count += 1
-        bb &= bb - np.uint64(1)
-    return count
-
-
-@njit(cache=True)
-def lsb(bb: int) -> int:
-    idx = 0
-    while (bb & np.uint64(1)) == 0:
-        bb >>= np.uint64(1)
-        idx += 1
-    return idx
+    two = np.uint64(0x3333_3333_3333_3333)
+    x = np.uint64(bb)
+    x -= (x >> np.uint64(1)) & np.uint64(0x5555_5555_5555_5555)
+    x = (x & two) + ((x >> np.uint64(2)) & two)
+    x = (x + (x >> np.uint64(4))) & np.uint64(0x0F0F_0F0F_0F0F_0F0F)
+    return (x * np.uint64(0x0101_0101_0101_0101)) >> np.uint64(56)
 
 
 # How many of `colour`'s pawns stand on `square`'s file, strictly ahead of it toward the far
@@ -286,13 +282,13 @@ def evaluate(board: Board) -> int:
         sign = 1 if colour == WHITE else -1
         own_pawns = board.pieces[colour, 0]
 
-        king_square = lsb(board.pieces[colour, KING])
+        king_square = lsb_index(board.pieces[colour, KING])
         king_file = king_square & 7
 
         for piece_type in range(6):
             bb = board.pieces[colour, piece_type]
             while bb:
-                square = lsb(bb)
+                square = lsb_index(bb)
                 bb &= bb - np.uint64(1)
 
                 # far pawn: on the opposite half of the board from its own king's file, so it
