@@ -122,11 +122,73 @@ class Batches:
             )
 
 
+# turn one block of packed rows into the (own, other, out_bucket, wdl, cp) batch tensors
+def _batch(
+    packed: Tensor, stm: Tensor, wdl: Tensor, cp: Tensor, rows: Tensor,
+    perm: Tensor, bit: Tensor, device: torch.device,
+) -> tuple[Tensor, ...]:
+    p = packed[rows].to(device)                                    # [B, 96] uint8
+    bits = (p.unsqueeze(-1) & bit).ne(0).to(torch.float32)         # [B, 96, 8]
+    white = bits.reshape(p.shape[0], -1)[:, :FEATURES]             # [B, 768]
+    black = white[:, perm]
+    wtm = stm[rows].to(device).unsqueeze(1)
+    own = torch.where(wtm, white, black)
+    other = torch.where(wtm, black, white)
+    out_bucket = torch.clamp((white.sum(dim=1).long() - 2) // 4, 0, OUTPUT_BUCKETS - 1)
+    return own, other, out_bucket, wdl[rows].to(device), cp[rows].to(device)
+
+
+class ShardStream:
+    """Streams (own, other, out_bucket, wdl, cp) batches over a directory of shard_*.npz without
+    ever holding the whole set in RAM - for training on the full ~300M-position dump on 16 GB.
+    Each epoch permutes the shard order and loads `block` shards (~3 GB) at a time, shuffling
+    rows within each loaded block; for many small shards that is close to a global shuffle.
+    train / val is split by whole shards, deterministically from `seed`."""
+
+    def __init__(
+        self, shard_dir: Path, batch: int, device: torch.device,
+        block: int = 12, val: bool = False, val_shards: int = 8, seed: int = 0,
+    ) -> None:
+        files = sorted(shard_dir.glob("shard_*.npz"))
+        if len(files) <= val_shards:
+            sys.exit(f"need more than {val_shards} shards in {shard_dir}, found {len(files)}")
+        held = set(np.random.default_rng(seed).permutation(len(files))[:val_shards].tolist())
+        self.files = [f for i, f in enumerate(files) if (i in held) == val]
+        self.batch, self.device, self.block, self.val = batch, device, block, val
+        self.perm = torch.from_numpy(PERM).to(device)
+        self.bit = (1 << torch.arange(8, dtype=torch.uint8)).to(device)
+        with np.load(self.files[0]) as d:
+            self.rows = len(d["cp"]) * len(self.files)
+
+    def __len__(self) -> int:
+        return (self.rows + self.batch - 1) // self.batch
+
+    def __iter__(self):
+        files = list(self.files)
+        if not self.val:
+            np.random.shuffle(files)
+        for start in range(0, len(files), self.block):
+            blk = files[start : start + self.block]
+            loaded = [np.load(f) for f in blk]
+            packed = torch.from_numpy(np.concatenate([d["packed"] for d in loaded]))
+            stm = torch.from_numpy(np.concatenate([d["stm"] for d in loaded]).astype(np.bool_))
+            wdl = torch.from_numpy(np.concatenate([d["wdl"] for d in loaded]).astype(np.float32))
+            cp = torch.from_numpy(np.concatenate([d["cp"] for d in loaded]).astype(np.float32))
+            for d in loaded:
+                d.close()
+            idx = np.arange(len(cp))
+            if not self.val:
+                np.random.shuffle(idx)
+            for s in range(0, len(idx), self.batch):
+                rows = torch.from_numpy(idx[s : s + self.batch]).long()
+                yield _batch(packed, stm, wdl, cp, rows, self.perm, self.bit, self.device)
+
+
 def sigmoid(x: Tensor) -> Tensor:
     return torch.sigmoid(x)
 
 
-def evaluate_split(model: NNUE, batches: Batches) -> tuple[float, float]:
+def evaluate_split(model: NNUE, batches: Batches | ShardStream) -> tuple[float, float]:
     """(wdl MSE, cp RMSE) over a split."""
     model.eval()
     wdl_se = 0.0
@@ -162,18 +224,27 @@ def main() -> None:
     device = pick_device(args.device)
     print(f"device {device}")
 
-    packed, stm, cp, wdl = load_dataset(args.npz, args.limit)
-    count = len(cp)
-    print(f"{count:,} positions from {args.npz.name}")
-
-    rng = np.random.default_rng(args.seed)
-    shuffled = rng.permutation(count)
-    val_n = int(args.val_frac * count)
-    val_index, train_index = shuffled[:val_n], shuffled[val_n:]
-    print(f"{len(train_index):,} train / {len(val_index):,} val")
-
-    train_batches = Batches(packed, stm, wdl, cp, train_index, args.batch, device, shuffle=True)
-    val_batches = Batches(packed, stm, wdl, cp, val_index, args.batch, device, shuffle=False)
+    if args.npz.is_dir() and args.limit == 0:
+        # stream the whole shard set from disk - too big for RAM
+        train_batches: Batches | ShardStream = ShardStream(
+            args.npz, args.batch, device, val=False, seed=args.seed
+        )
+        val_batches: Batches | ShardStream = ShardStream(
+            args.npz, args.batch, device, val=True, seed=args.seed
+        )
+        print(f"streaming {len(train_batches.files):,} train / {len(val_batches.files):,} val "
+              f"shards from {args.npz.name}  (~{train_batches.rows:,} train positions)")
+    else:
+        packed, stm, cp, wdl = load_dataset(args.npz, args.limit)
+        count = len(cp)
+        print(f"{count:,} positions from {args.npz.name}")
+        rng = np.random.default_rng(args.seed)
+        shuffled = rng.permutation(count)
+        val_n = int(args.val_frac * count)
+        val_index, train_index = shuffled[:val_n], shuffled[val_n:]
+        print(f"{len(train_index):,} train / {len(val_index):,} val")
+        train_batches = Batches(packed, stm, wdl, cp, train_index, args.batch, device, shuffle=True)
+        val_batches = Batches(packed, stm, wdl, cp, val_index, args.batch, device, shuffle=False)
 
     model = NNUE(ft_out=args.ft_out).to(device)
     optimiser = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)

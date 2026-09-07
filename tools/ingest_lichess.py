@@ -143,8 +143,14 @@ def main() -> None:
     parser.add_argument("--shard-size", type=int, default=0,
                         help="rows per shard; >0 writes --out/shard_NNNN.npz and streams (no OOM "
                              "on the full dump)")
+    parser.add_argument("--part", default="0/1",
+                        help="'I/N': this worker handles only lines with (line_no %% N == I), so "
+                             "N copies over the same dump split the ~35 h single-thread scan")
     parser.add_argument("--report-every", type=int, default=200_000)
     args = parser.parse_args()
+
+    part_i, part_n = (int(x) for x in args.part.split("/"))
+    tag = "" if part_n == 1 else f"p{part_i}_"
 
     sharding = args.shard_size > 0
     if sharding:
@@ -159,6 +165,8 @@ def main() -> None:
     shard = 0
 
     for seen, line in enumerate(open_lines(args.input), start=1):
+        if seen % part_n != part_i:
+            continue
         if args.keep_every > 1 and seen % args.keep_every:
             continue
 
@@ -178,7 +186,7 @@ def main() -> None:
                   flush=True)
 
         if sharding and len(rows_cp) >= args.shard_size:
-            path = os.path.join(args.out, f"shard_{shard:04d}.npz")
+            path = os.path.join(args.out, f"shard_{tag}{shard:04d}.npz")
             write_shard(path, rows_packed, rows_stm, rows_cp)
             print(f"  wrote {path}  ({len(rows_cp):,} rows)", flush=True)
             rows_packed, rows_stm, rows_cp = [], [], []
@@ -193,7 +201,7 @@ def main() -> None:
     elapsed = time.time() - started
     if sharding:
         if rows_cp:
-            path = os.path.join(args.out, f"shard_{shard:04d}.npz")
+            path = os.path.join(args.out, f"shard_{tag}{shard:04d}.npz")
             write_shard(path, rows_packed, rows_stm, rows_cp)
             print(f"  wrote {path}  ({len(rows_cp):,} rows)", flush=True)
             shard += 1
