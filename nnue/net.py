@@ -10,8 +10,11 @@ net.npz layout (all little-endian):
     ft_scale      float32 scalar         accumulator_float = clip(accumulator_int * ft_scale, 0, 1)
     l1_weight     float32 [32, 2*ft_out]  l1_bias float32 [32]   tail (int8 was tried, no numba win)
     l2_weight     float32 [32, 32]        l2_bias float32 [32]
-    out_weight    float32 [1, 32]         out_bias float32 [1]
+    out_weight    float32 [output_buckets, 32]   out_bias float32 [output_buckets]
     cp_scale      float32 scalar          centipawns = round(raw_output * cp_scale)
+
+The final layer is one head per output bucket; a forward selects the head the position's piece
+count picks (nnue.arch.output_bucket).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from nnue.arch import BLACK, FEATURES, WHITE, black_perspective_perm
+from nnue.arch import BLACK, FEATURES, WHITE, black_perspective_perm, output_bucket
 
 # built once: black_plane[:, i] == white_plane[:, PERM[i]]
 PERM = np.asarray(black_perspective_perm(), dtype=np.int64)
@@ -78,21 +81,34 @@ def clipped_relu(x: np.ndarray) -> np.ndarray:
     return np.clip(x, 0.0, 1.0)
 
 
-# centipawns, side-to-move relative, from integer accumulators [N, 2, ft_out]. The same
-# computation the numba evaluate_accumulator() runs: dequantise the accumulator, clipped ReLU,
-# then the float tail. tools/verify_nnue.py holds the engine to this.
-def forward_from_accumulators(acc: np.ndarray, weights: Weights) -> np.ndarray:
+# output bucket per row from packed bitboards: total set bits is the piece count (the 12
+# bitboards partition the occupied squares), then nnue.arch.output_bucket.
+def output_buckets_of(packed: np.ndarray) -> np.ndarray:
+    counts = np.unpackbits(packed, axis=1).sum(axis=1)
+    return np.array([output_bucket(int(c)) for c in counts], dtype=np.int64)
+
+
+# centipawns, side-to-move relative, from integer accumulators [N, 2, ft_out] and the per-row
+# output bucket [N]. The same computation the numba evaluate_accumulator() runs: dequantise the
+# accumulator, clipped ReLU, then the float tail, taking each row's selected head.
+# tools/verify_nnue.py holds the engine to this.
+def forward_from_accumulators(
+    acc: np.ndarray, weights: Weights, out_bucket: np.ndarray
+) -> np.ndarray:
     activated = clipped_relu(acc.astype(np.float32) * weights.ft_scale)  # [N, 2, ft_out]
     x = activated.reshape(acc.shape[0], 2 * acc.shape[-1])
     x = clipped_relu(x @ weights.l1_weight.T + weights.l1_bias)
     x = clipped_relu(x @ weights.l2_weight.T + weights.l2_bias)
-    raw = x @ weights.out_weight.T + weights.out_bias
-    return raw[:, 0] * weights.cp_scale
+    heads = x @ weights.out_weight.T + weights.out_bias  # [N, output_buckets]
+    raw = heads[np.arange(heads.shape[0]), out_bucket]
+    return raw * weights.cp_scale
 
 
 # convenience: centipawns straight from packed bitboards + stm.
 def forward_packed(packed: np.ndarray, stm: np.ndarray, weights: Weights) -> np.ndarray:
-    return forward_from_accumulators(accumulators(packed, stm, weights), weights)
+    return forward_from_accumulators(
+        accumulators(packed, stm, weights), weights, output_buckets_of(packed)
+    )
 
 
 # 96-byte packed feature vector from a python-chess board, matching tools/label.py:features so

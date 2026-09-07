@@ -29,12 +29,26 @@ L1_WEIGHT = WEIGHTS.l1_weight       # float32 [32, 2*ft_out]
 L1_BIAS = WEIGHTS.l1_bias           # float32 [32]
 L2_WEIGHT = WEIGHTS.l2_weight       # float32 [32, 32]
 L2_BIAS = WEIGHTS.l2_bias           # float32 [32]
-OUT_WEIGHT = WEIGHTS.out_weight     # float32 [1, 32]
-OUT_BIAS = WEIGHTS.out_bias         # float32 [1]
+OUT_WEIGHT = WEIGHTS.out_weight     # float32 [out_buckets, 32]
+OUT_BIAS = WEIGHTS.out_bias         # float32 [out_buckets]
 CP_SCALE = float(WEIGHTS.cp_scale)  # centipawns = raw_output * CP_SCALE
 
 ACC_WIDTH = int(FT_BIAS.shape[0])   # ft_out
+OUT_BUCKETS = int(OUT_BIAS.shape[0])  # final-layer heads, one per piece-count band
 HALF = 384                          # one perspective-colour block: 6 piece types * 64 squares
+
+
+# Set-bit count, SWAR - bitboard.popcount is plain-Python (bb.bit_count()), so the jitted eval
+# path needs its own. Mirrors agent.popcount.
+# ref: https://www.chessprogramming.org/Population_Count#SWAR-Popcount
+@njit(cache=True)
+def popcount(bb: int) -> int:
+    two = np.uint64(0x3333_3333_3333_3333)
+    x = np.uint64(bb)
+    x -= (x >> np.uint64(1)) & np.uint64(0x5555_5555_5555_5555)
+    x = (x & two) + ((x >> np.uint64(2)) & two)
+    x = (x + (x >> np.uint64(4))) & np.uint64(0x0F0F_0F0F_0F0F_0F0F)
+    return (x * np.uint64(0x0101_0101_0101_0101)) >> np.uint64(56)
 
 
 # Flat transformer-input index for a piece of `piece_colour` (0 white, 1 black) of `piece_type`
@@ -87,13 +101,19 @@ def update_feature(
 
 
 # Centipawns, side-to-move relative, from the accumulators `acc` (int32 [2, ft_out]) with
-# `side` to move. Dequantise both perspectives (own first) to [0, 1] with a clipped ReLU, then
-# the float tail. This runs at every search leaf - the hot path. fastmath lets numba vectorise
-# the MAC loops.
+# `side` to move and `piece_count` men on the board (picks the output-bucket head). Dequantise
+# both perspectives (own first) to [0, 1] with a clipped ReLU, then the float tail. This runs at
+# every search leaf - the hot path. fastmath lets numba vectorise the MAC loops.
 @njit(cache=True, fastmath=True)
-def evaluate_accumulator(acc: np.ndarray, side: int) -> int:
+def evaluate_accumulator(acc: np.ndarray, side: int, piece_count: int) -> int:
     own = side
     other = 1 - side
+
+    bucket = (piece_count - 2) // 4  # nnue.arch.output_bucket, rederived
+    if bucket < 0:
+        bucket = 0
+    elif bucket >= OUT_BUCKETS:
+        bucket = OUT_BUCKETS - 1
 
     activated = np.empty(2 * ACC_WIDTH, dtype=np.float32)
     for i in range(ACC_WIDTH):
@@ -116,9 +136,9 @@ def evaluate_accumulator(acc: np.ndarray, side: int) -> int:
             total += L2_WEIGHT[j, i] * hidden1[i]
         hidden2[j] = 0.0 if total < 0.0 else (1.0 if total > 1.0 else total)
 
-    raw = OUT_BIAS[0]
+    raw = OUT_BIAS[bucket]
     for i in range(32):
-        raw += OUT_WEIGHT[0, i] * hidden2[i]
+        raw += OUT_WEIGHT[bucket, i] * hidden2[i]
 
     return np.int64(round(raw * CP_SCALE))
 
@@ -132,8 +152,9 @@ def warm_up() -> None:
     fill_accumulator(pieces, acc)
     update_feature(acc, 0, 0, 8, 1)
     update_feature(acc, 0, 0, 8, -1)
-    evaluate_accumulator(acc, 0)
-    evaluate_accumulator(acc, 1)
+    evaluate_accumulator(acc, 0, 4)
+    evaluate_accumulator(acc, 1, 24)
+    popcount(np.uint64(0xFF00))
 
 
 warm_up()

@@ -26,6 +26,11 @@ L1_OUT = 32           # first tail layer, fed the 2 * FT_OUT concatenation
 L2_OUT = 32           # second tail layer
 L1_IN = 2 * FT_OUT    # 512
 
+# The final 32 -> 1 layer is one of OUTPUT_BUCKETS weight sets, chosen by the total piece count.
+# The endgame - where the single-head net is weakest (docs/nnue-plan.md) - gets its own heads
+# without spending accumulator width. Selection only: eval cost is one head, not OUTPUT_BUCKETS.
+OUTPUT_BUCKETS = 8
+
 # the net regresses an internal score on a "pawns / 4" scale; runtime multiplies by this to
 # get centipawns, training compares sigmoid(pred) against the win-probability label. keep the
 # two in step: SCALE == 1 / K in tools/label.py (K = 1/400).
@@ -42,6 +47,14 @@ def feature_index(perspective: int, piece_colour: int, piece_type: int, square: 
     relative_colour = 0 if piece_colour == perspective else 1
     relative_square = square if perspective == WHITE else square ^ 56
     return relative_colour * (PIECE_TYPES * SQUARES) + piece_type * SQUARES + relative_square
+
+
+# total piece count (2..32) -> output bucket 0..OUTPUT_BUCKETS-1. Four pieces per bucket, so
+# 2..5 -> 0 and 30..32 -> 7; the last bucket absorbs the overflow. The numba runtime rederives
+# this from OUT_BIAS.shape[0]; keep the arithmetic identical if you change it.
+def output_bucket(piece_count: int) -> int:
+    bucket = (piece_count - 2) // 4
+    return bucket if bucket < OUTPUT_BUCKETS else OUTPUT_BUCKETS - 1
 
 
 # the length-768 column permutation that turns a white-perspective plane into a black-perspective

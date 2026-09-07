@@ -56,11 +56,18 @@ Ref: https://www.chessprogramming.org/NNUE
 `nnue/arch.py` today: 768 -> 256 x2 -> 32 -> 32 -> 1, dual perspective, **no king buckets, no
 output buckets**. `nnue/net.npz` is ~240 KB.
 
+- [x] **Output buckets by piece count** (8), selected at `evaluate` time. `nnue/arch.py`
+      `OUTPUT_BUCKETS` + `output_bucket()`; the final 32 -> 1 layer is `[8, 32]`, the runtime
+      picks one head from `popcount(occupancy)`. Trainer (`nnue/model.py` `nn.Linear(32, 8)` +
+      per-sample gather), `tools/train_nn.py`, `tools/export_nn.py`, `nnue/net.py` oracle all
+      carry the bucket. Selection only - eval cost is one head. verify_nnue: engine == numpy
+      twin within 2 cp, accumulator exact.
 - [ ] King-zone buckets on the feature transformer: pick the perspective side's first-layer
       weight slab by that side's king zone. Start with 16 zones (their +31 Elo point); build
-      the zone map so a later mirror to 8x2 is a one-line change.
-- [ ] Output buckets by piece count (start 8), selected at `evaluate` time.
-- [ ] Keep FT_OUT at 256. Do not widen.
+      the zone map so a later mirror to 8x2 is a one-line change. Needs an accumulator refresh
+      when a king crosses a zone (`nnue/movegen.py make_move`).
+- [x] FT_OUT back to 256 (arch default; the shipped net had been trained at 128). Not widening
+      past that yet.
 - [ ] Endgame data: label a <= 16-piece slice with the Stockfish pipeline (`tools/label.py`)
       and mix it into `data/` at a share we tune, not weight-dumped in. Track slope on a
       held-out Lichess set (`sum(pred*target) / sum(target**2)` ~ 1.0) so a rescaled head is

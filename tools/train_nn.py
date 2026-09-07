@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nnue.arch import CP_SCALE, FEATURES  # noqa: E402
+from nnue.arch import CP_SCALE, FEATURES, OUTPUT_BUCKETS  # noqa: E402
 from nnue.model import NNUE  # noqa: E402
 from nnue.net import PERM  # noqa: E402
 
@@ -40,9 +40,10 @@ def pick_device(name: str) -> torch.device:
 
 
 class Batches:
-    """Yields (own_plane, other_plane, wdl, cp) tensors on `device`. The packed bitboards stay
-    a uint8 CPU tensor; per batch they are unpacked to a white-perspective plane, the black
-    perspective is the fixed column permutation of it, and side-to-move picks which is 'own'."""
+    """Yields (own_plane, other_plane, out_bucket, wdl, cp) tensors on `device`. The packed
+    bitboards stay a uint8 CPU tensor; per batch they are unpacked to a white-perspective plane,
+    the black perspective is the fixed column permutation of it, and side-to-move picks which is
+    'own'. out_bucket is the piece-count band (set bits in the plane) for the output head."""
 
     def __init__(
         self, packed: np.ndarray, stm: np.ndarray, wdl: np.ndarray, cp: np.ndarray,
@@ -75,8 +76,10 @@ class Batches:
             white_to_move = self.stm[rows].to(self.device).unsqueeze(1)
             own = torch.where(white_to_move, white, black)
             other = torch.where(white_to_move, black, white)
+            piece_count = white.sum(dim=1).long()                     # [B]
+            out_bucket = torch.clamp((piece_count - 2) // 4, 0, OUTPUT_BUCKETS - 1)
             yield (
-                own, other,
+                own, other, out_bucket,
                 self.wdl[rows].to(self.device),
                 self.cp[rows].to(self.device),
             )
@@ -93,8 +96,8 @@ def evaluate_split(model: NNUE, batches: Batches) -> tuple[float, float]:
     cp_se = 0.0
     n = 0
     with torch.no_grad():
-        for own, other, wdl, cp in batches:
-            pred = model(own, other)
+        for own, other, out_bucket, wdl, cp in batches:
+            pred = model(own, other, out_bucket)
             wdl_se += torch.sum((sigmoid(pred) - wdl) ** 2).item()
             cp_se += torch.sum((pred * CP_SCALE - cp) ** 2).item()
             n += own.shape[0]
@@ -150,9 +153,9 @@ def main() -> None:
         started = time.time()
         running = 0.0
         seen = 0
-        for own, other, wdl_batch, _cp_batch in train_batches:
+        for own, other, out_bucket, wdl_batch, _cp_batch in train_batches:
             optimiser.zero_grad(set_to_none=True)
-            pred = model(own, other)
+            pred = model(own, other, out_bucket)
             loss = torch.mean((sigmoid(pred) - wdl_batch) ** 2)
             loss.backward()
             optimiser.step()
@@ -184,7 +187,7 @@ def main() -> None:
             "state_dict": best_state,
             "val_mse": best_val,
             "ft_out": args.ft_out,
-            "arch": f"nnue-v1-768-{args.ft_out}-32-32",
+            "arch": f"nnue-v2-768-{args.ft_out}-32-32-o{OUTPUT_BUCKETS}",
         },
         args.out,
     )

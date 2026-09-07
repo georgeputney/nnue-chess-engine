@@ -97,7 +97,7 @@ from move import (
 from move import (
     move_promotion_raw as move_promotion,
 )
-from nnue.accumulator import evaluate_accumulator
+from nnue.accumulator import evaluate_accumulator, popcount
 from nnue.board import Board, copy_board, parse_fen
 from nnue.movegen import is_check, legal_moves, make_move
 from zobrist import EP_FILE_KEYS, SIDE_KEY, zobrist_hash
@@ -235,7 +235,7 @@ STATE = SearchState()
 # dequantise-and-run-the-float-tail in nnue/accumulator.py; no board scan here.
 @njit(cache=True)
 def evaluate(board: Board) -> int:
-    return evaluate_accumulator(board.acc, board.side)
+    return evaluate_accumulator(board.acc, board.side, popcount(board.occupancy[2]))
 
 
 # Piece type (0..5) on `square`, either colour, or -1 if empty - python-chess's board.piece_at

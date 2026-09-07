@@ -95,8 +95,11 @@ def main() -> None:
     quant_cp = netmod.forward_packed(packed, stm, weights)
 
     own, other = netmod.perspective_planes(packed, stm)
+    out_bucket = torch.from_numpy(netmod.output_buckets_of(packed))
     with torch.no_grad():
-        float_cp = model(torch.from_numpy(own), torch.from_numpy(other)).numpy() * CP_SCALE
+        float_cp = (
+            model(torch.from_numpy(own), torch.from_numpy(other), out_bucket).numpy() * CP_SCALE
+        )
 
     diff = quant_cp - float_cp
     print(
