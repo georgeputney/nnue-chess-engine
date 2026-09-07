@@ -62,10 +62,29 @@ output buckets**. `nnue/net.npz` is ~240 KB.
       per-sample gather), `tools/train_nn.py`, `tools/export_nn.py`, `nnue/net.py` oracle all
       carry the bucket. Selection only - eval cost is one head. verify_nnue: engine == numpy
       twin within 2 cp, accumulator exact.
-- [ ] King-zone buckets on the feature transformer: pick the perspective side's first-layer
-      weight slab by that side's king zone. Start with 16 zones (their +31 Elo point); build
-      the zone map so a later mirror to 8x2 is a one-line change. Needs an accumulator refresh
-      when a king crosses a zone (`nnue/movegen.py make_move`).
+- [ ] King-zone buckets on the feature transformer (16, `king_bucket(sq) = 4*(rank//2) +
+      file//2` - a later mirror to 8x2 is a one-line change). Design, worked out, not yet built:
+  - `nnue/arch.py`: `KING_BUCKETS`, `king_bucket()`.
+  - net.npz: `ft_weight_t [KB, 768, ft_out]` int16, `ft_bias [KB, ft_out]` int32.
+  - `nnue/accumulator.py`: `KING_BUCKETS = int(FT_BIAS.shape[0])`; jitted `king_bucket`;
+    `fill_accumulator(pieces, acc, buckets)` and `update_feature(acc, buckets, ...)` index
+    `FT_WEIGHT_T[buckets[perspective]]`; new `refresh_one(pieces, acc, perspective, bucket)`.
+  - `nnue/board.py`: `BOARD_SPEC` gains `("acc_bucket", nb.int32[:])` (len 2); `__init__`,
+    `copy_board`, `parse_fen` all set it. Each perspective's bucket = that perspective owner's
+    king in that perspective's frame (white: `king_bucket(wk)`; black: `king_bucket(bk ^ 56)`).
+  - `nnue/movegen.py make_move`: after the incremental `update_feature` calls, if `piece ==
+    KING` and the moved colour's new bucket differs from `new.acc_bucket[colour]`, set it and
+    `refresh_one` that one perspective (the wasted incremental work on it is discarded).
+    `make_move_reference`: recompute both buckets, `fill_accumulator(..., new.acc_bucket)`.
+  - `nnue/model.py`: `transformer = nn.ModuleList([nn.Linear(FEATURES, ft_out)] * KB)`; forward
+    takes `own_bucket`, `other_bucket`, loops the 16 buckets with a boolean mask per bucket.
+  - `tools/train_nn.py`: king squares are plane bits `[5*64:6*64]` (white) / `[11*64:12*64]`
+    (black); `wk_bkt = king_bucket(wk)`, `bk_bkt = king_bucket(bk ^ 56)`; `own/other_bucket`
+    by side to move.
+  - `tools/export_nn.py`: stack the 16 transformers, one shared int16 scale over all.
+  - `nnue/net.py accumulators()`: same king-square extraction; loop the 16 buckets (a gathered
+    `ft[own_bkt]` is `[N, 768, ft_out]` - 39 GB at N=50k, do not).
+  - Then: clear `*.nbc/*.nbi`, smoke-train, export, `verify_nnue`, full retrain.
 - [x] FT_OUT back to 256 (arch default; the shipped net had been trained at 128). Not widening
       past that yet.
 - [ ] Endgame data: label a <= 16-piece slice with the Stockfish pipeline (`tools/label.py`)
@@ -169,6 +188,12 @@ too - audit `agent.py`'s budget against them:
   fixed movetime; a **veto** on eval changes, not a ranking signal.
 - `import` wall time - `time uv run python -c "import nnue.agent"` on every bundle; every njit
   branch is numba compile time against the 90 s init budget.
+
+**Retrain gotcha:** `nnue/net.npz` is a module global that `@njit(cache=True)` functions in
+`nnue/accumulator.py` freeze into their on-disk cache. After any retrain / re-export, numba
+keeps running the *old* weights until the cache is cleared:
+`find . -name '*.nbc' -o -name '*.nbi' | xargs rm` (and drop `__pycache__/`). verify_nnue's
+oracle diff blowing up to hundreds of cp with the accumulator check still passing is the tell.
 
 ---
 
