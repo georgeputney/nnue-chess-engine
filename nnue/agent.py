@@ -100,6 +100,7 @@ from move import (
 from nnue.accumulator import evaluate_accumulator, popcount
 from nnue.board import Board, copy_board, parse_fen
 from nnue.movegen import is_check, legal_moves, make_move
+from nnue.tablebase import best_tb_move
 from zobrist import EP_FILE_KEYS, SIDE_KEY, zobrist_hash
 
 # rough centipawn values for move ordering and delta pruning only; indexed by bitboard piece id
@@ -1166,6 +1167,19 @@ def get_move(fen: str, time_left_ms: int) -> str:
         del GAME_HASHES[: len(GAME_HASHES) - window]
     load_game_hashes()
     _LAST_KEY = 0  # set again only on a real-move return; a non-search reply carries nothing
+
+    # Syzygy: with few enough men the tablebase gives the exact best move, so the endgame is
+    # played perfectly instead of trusting a net that never learned to convert (KRvK evals at
+    # +57 cp). Optimal and deterministic - no anti-repetition bookkeeping needed - but keep the
+    # game trail continuous in case a later position falls back to the search. A probe failure
+    # must never cost the game: fall through.
+    try:
+        tb_uci = best_tb_move(fen)
+    except Exception:  # any tablebase trouble just means "search instead"
+        tb_uci = None
+    if tb_uci is not None:
+        _LAST_KEY = key
+        return tb_uci
 
     # critically low on time: don't search at all - even one depth-1 iteration could overrun
     # what this move has left. grab the best-looking move and return.
