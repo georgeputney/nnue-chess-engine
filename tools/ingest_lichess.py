@@ -121,24 +121,42 @@ def process_line(line: str, min_depth: int, max_cp: int) -> tuple[chess.Board, i
     return board, int(white_to_move), cp_stm
 
 
+def write_shard(path: str, packed: list, stm: list, cp: list) -> None:
+    cps = np.array(cp, np.int16)
+    wdl = (1.0 / (1.0 + np.exp(-K * cps.astype(np.float32)))).astype(np.float32)
+    np.savez_compressed(path, packed=np.stack(packed), stm=np.array(stm, np.uint8),
+                        cp=cps, wdl=wdl)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="input", required=True,
                         help="path to the .jsonl or .jsonl.zst dump, or - for stdin")
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--out", required=True,
+                        help="a .npz file, or (with --shard-size) a directory for shard_NNNN.npz")
     parser.add_argument("--min-depth", type=int, default=20, help="drop shallower analyses")
     parser.add_argument("--max-cp", type=int, default=3000,
                         help="drop positions scored beyond this; keep it above a queen")
     parser.add_argument("--keep-every", type=int, default=1,
                         help="subsample: process only every Nth line, for speed on the full dump")
     parser.add_argument("--limit", type=int, default=0, help="stop after this many kept positions")
+    parser.add_argument("--shard-size", type=int, default=0,
+                        help="rows per shard; >0 writes --out/shard_NNNN.npz and streams (no OOM "
+                             "on the full dump)")
     parser.add_argument("--report-every", type=int, default=200_000)
     args = parser.parse_args()
+
+    sharding = args.shard_size > 0
+    if sharding:
+        os.makedirs(args.out, exist_ok=True)
+    else:
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     rows_packed, rows_stm, rows_cp = [], [], []
     started = time.time()
     seen = 0
     kept = 0
+    shard = 0
 
     for seen, line in enumerate(open_lines(args.input), start=1):
         if args.keep_every > 1 and seen % args.keep_every:
@@ -156,28 +174,39 @@ def main() -> None:
 
         if kept % args.report_every == 0:
             elapsed = time.time() - started
-            print(f"  {seen:,} lines read, {kept:,} kept  ({seen / elapsed:,.0f} lines/s)")
+            print(f"  {seen:,} lines read, {kept:,} kept  ({seen / elapsed:,.0f} lines/s)",
+                  flush=True)
+
+        if sharding and len(rows_cp) >= args.shard_size:
+            path = os.path.join(args.out, f"shard_{shard:04d}.npz")
+            write_shard(path, rows_packed, rows_stm, rows_cp)
+            print(f"  wrote {path}  ({len(rows_cp):,} rows)", flush=True)
+            rows_packed, rows_stm, rows_cp = [], [], []
+            shard += 1
 
         if args.limit and kept >= args.limit:
             break
 
-    if not rows_cp:
+    if not rows_cp and not (sharding and shard):
         sys.exit("no positions kept - check --in and the depth/cp filters")
 
-    packed = np.stack(rows_packed)
-    stm = np.array(rows_stm, np.uint8)
-    cps = np.array(rows_cp, np.int16)
-    wdl = (1.0 / (1.0 + np.exp(-K * cps.astype(np.float32)))).astype(np.float32)
-
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    np.savez_compressed(args.out, packed=packed, stm=stm, cp=cps, wdl=wdl)
-
     elapsed = time.time() - started
+    if sharding:
+        if rows_cp:
+            path = os.path.join(args.out, f"shard_{shard:04d}.npz")
+            write_shard(path, rows_packed, rows_stm, rows_cp)
+            print(f"  wrote {path}  ({len(rows_cp):,} rows)", flush=True)
+            shard += 1
+        print(f"wrote {shard} shards to {args.out}  {kept:,} / {seen:,} lines  "
+              f"in {elapsed / 60:.1f} min")
+        return
+
+    write_shard(args.out, rows_packed, rows_stm, rows_cp)
+    cps = np.array(rows_cp, np.int16)
     size = os.path.getsize(args.out) / 1e6
     print(f"wrote {args.out}  {kept:,} / {seen:,} lines  {size:.1f} MB  in {elapsed / 60:.1f} min")
     print(f"cp: median {np.median(cps):.0f}  sd {cps.std():.0f}  "
           f"5-95 pct {np.percentile(cps, 5):.0f} to {np.percentile(cps, 95):.0f}")
-    print(f"wdl: mean {wdl.mean():.3f}  sd {wdl.std():.3f}")
 
 
 if __name__ == "__main__":

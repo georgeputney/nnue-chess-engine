@@ -31,6 +31,43 @@ from nnue.model import NNUE  # noqa: E402
 from nnue.net import PERM  # noqa: E402
 
 
+# Load a labelled set from a single .npz or a directory of shard_*.npz (tools/ingest_lichess.py
+# --shard-size). Shards are counted first and copied into one preallocated block so peak memory
+# is the block plus one shard, not two full copies.
+def load_dataset(path: Path, limit: int) -> tuple[np.ndarray, ...]:
+    if path.is_dir():
+        files = sorted(path.glob("shard_*.npz"))
+        if not files:
+            sys.exit(f"no shard_*.npz in {path}")
+        counts = []
+        for f in files:
+            with np.load(f) as d:
+                counts.append(len(d["cp"]))
+        total = sum(counts) if limit <= 0 else min(sum(counts), limit)
+        packed = np.empty((total, 96), np.uint8)
+        stm = np.empty(total, np.uint8)
+        cp = np.empty(total, np.int16)
+        wdl = np.empty(total, np.float32)
+        at = 0
+        for f, c in zip(files, counts, strict=True):
+            if at >= total:
+                break
+            take = min(c, total - at)
+            with np.load(f) as d:
+                packed[at:at + take] = d["packed"][:take]
+                stm[at:at + take] = d["stm"][:take]
+                cp[at:at + take] = d["cp"][:take]
+                wdl[at:at + take] = d["wdl"][:take]
+            at += take
+        print(f"loaded {total:,} positions from {len(files)} shards in {path.name}")
+        return packed, stm, cp, wdl
+
+    blob = np.load(path)
+    packed, stm, cp, wdl = blob["packed"], blob["stm"], blob["cp"], blob["wdl"]
+    n = len(cp) if limit <= 0 else min(limit, len(cp))
+    return packed[:n], stm[:n], cp[:n], wdl[:n]
+
+
 def pick_device(name: str) -> torch.device:
     if name != "auto":
         return torch.device(name)
@@ -125,10 +162,8 @@ def main() -> None:
     device = pick_device(args.device)
     print(f"device {device}")
 
-    blob = np.load(args.npz)
-    packed, stm, cp, wdl = blob["packed"], blob["stm"], blob["cp"], blob["wdl"]
-    count = len(cp) if args.limit <= 0 else min(args.limit, len(cp))
-    packed, stm, cp, wdl = packed[:count], stm[:count], cp[:count], wdl[:count]
+    packed, stm, cp, wdl = load_dataset(args.npz, args.limit)
+    count = len(cp)
     print(f"{count:,} positions from {args.npz.name}")
 
     rng = np.random.default_rng(args.seed)
