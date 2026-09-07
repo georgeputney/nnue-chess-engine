@@ -183,6 +183,15 @@ EVAL_CACHE = 1
 SEEN: dict[int, int] = {}
 PLAYED: dict[int, int] = {}
 
+# every position the real game has reached, oldest first, trimmed to the reversible window (only
+# positions since the last pawn move or capture can ever recur). get_move appends the position
+# it was last handed and loads this into STATE.game_hashes before each search, so the search's
+# repetition checks count the whole game, not just the current tree. _LAST_KEY is the previous
+# get_move's position hash, 0 when there is nothing to carry (first move, or a non-search reply).
+GAME_HASHES: list[int] = []
+_LAST_KEY: int = 0
+MASK64 = (1 << 64) - 1
+
 
 STATE_SPEC = [
     ("tt_key", nb.uint64[:]),
@@ -194,6 +203,8 @@ STATE_SPEC = [
     ("history", nb.int64[:, :, :]),   # [side][bitboard piece id][to-square] cutoff tally
     ("killers", nb.int64[:, :]),      # [depth][0..1] quiet move that cut there, or NO_MOVE
     ("path", nb.uint64[:]),           # node hash per ply, for repetition detection
+    ("game_hashes", nb.uint64[:]),    # positions from the real game before this search (the
+    ("game_n", nb.int64),             # reversible window), so repetition checks see the whole game
     ("nodes", nb.int64),
     ("root_best", nb.int64),
     ("aborted", nb.int64),
@@ -220,6 +231,8 @@ class SearchState:
         self.history = np.zeros((2, 7, 64), dtype=np.int64)
         self.killers = np.full((MAX_DEPTH + 1, 2), NO_MOVE, dtype=np.int64)
         self.path = np.zeros(MAX_DEPTH * 2 + 8, dtype=np.uint64)
+        self.game_hashes = np.zeros(128, dtype=np.uint64)
+        self.game_n = 0
         self.nodes = 0
         self.root_best = NO_MOVE
         self.aborted = 0
@@ -526,6 +539,20 @@ def repetitions(path: np.ndarray, upto: int, node_hash: int) -> int:
     return n
 
 
+# Occurrences of `node_hash` among the positions the real game reached before this search
+# (get_move seeds state.game_hashes with the reversible window). Added to `repetitions` at every
+# repetition check so a line that returns to a position the game has already visited is scored
+# as the draw the referee would claim - the search cannot see the game history any other way.
+@njit(cache=True)
+def game_reps(state: SearchState, node_hash: int) -> int:
+    n = 0
+    for i in range(state.game_n):
+        if state.game_hashes[i] == node_hash:
+            n += 1
+
+    return n
+
+
 # A draw scored from the side-to-move's view at `ply`: negative when it is our move (an even ply
 # from the root), positive when it is the opponent's. A repetition or stalemate then only wins
 # the search when every real try is worse than conceding CONTEMPT, so a level game is played on
@@ -565,10 +592,10 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     key = board.zobrist
     state.path[ply] = key
 
-    # threefold repetition inside the search is a draw. checking for the third occurrence (not
-    # the second) keeps this off a position the game has only reached once for real.
+    # threefold repetition is a draw - counting the search path plus what the real game already
+    # reached (game_reps), so a position the game has seen twice needs only one more here.
     # ref: https://www.chessprogramming.org/Repetitions
-    if repetitions(state.path, ply + 1, key) >= 3:
+    if repetitions(state.path, ply + 1, key) + game_reps(state, key) >= 3:
         return contempt_draw(ply)
 
     # mate-distance pruning: clamp the window to the mate band still reachable from here.
@@ -735,9 +762,13 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
         new_depth = depth - 1 + extension  # the check extension, if any, folds in here
 
         # first repetition scores as a draw and the line is not searched on - a move before the
-        # threefold rule, so the search can still steer into or away from the draw.
+        # threefold rule, so the search can still steer into or away from the draw. counts the
+        # real game too: while winning we then never bring a position up for a second time.
         # ref: https://www.chessprogramming.org/Repetitions
-        if child.halfmove_clock >= 4 and repetitions(state.path, ply + 1, child.zobrist) >= 1:
+        if child.halfmove_clock >= 4 and (
+            repetitions(state.path, ply + 1, child.zobrist)
+            + game_reps(state, child.zobrist) >= 1
+        ):
             score = contempt_draw(ply)
         elif r == 0:
             # the move the ordering trusts most - full-window principal variation search.
@@ -836,9 +867,8 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
 
     key = board.zobrist
     state.path[ply] = key
-    # threefold repetition is a draw - same guard as negamax. a check sequence that runs into
-    # the qsearch tail can still cycle; without this it just keeps searching it.
-    if repetitions(state.path, ply + 1, key) >= 3:
+    # threefold repetition is a draw - same guard as negamax, real game included.
+    if repetitions(state.path, ply + 1, key) + game_reps(state, key) >= 3:
         return contempt_draw(ply)
 
     in_check = is_check(board, board.side)
@@ -993,9 +1023,12 @@ def search_root(
         move = moves[ranked[r]]
         child = make_move(board, move)
         
-        if child.halfmove_clock >= 4 and repetitions(state.path, 1, child.zobrist) >= 1:
-            # this move brings a position up for the second time - a draw (see negamax). the
-            # root is our move, so contempt_draw(0) docks it: don't repeat unless all else is worse
+        if child.halfmove_clock >= 4 and (
+            repetitions(state.path, 1, child.zobrist) + game_reps(state, child.zobrist) >= 1
+        ):
+            # this move brings a position up for the second time (search path or real game) - a
+            # draw (see negamax). the root is our move, so contempt_draw(0) docks it: don't
+            # repeat unless all else is worse.
             score = contempt_draw(0)
         elif r == 0:
             # first move: full window; children search from ply 1 so a mate there is mate-in-1
@@ -1096,6 +1129,16 @@ def panic_move(board: Board) -> int:
     return best
 
 
+# Copy the tail of GAME_HASHES into STATE.game_hashes so the jitted repetition checks can read
+# it. The window is already small (bounded by the fifty-move clock); the cap is a safety net.
+def load_game_hashes() -> None:
+    cap = STATE.game_hashes.shape[0]
+    n = min(len(GAME_HASHES), cap)
+    for i in range(n):
+        STATE.game_hashes[i] = np.uint64(GAME_HASHES[len(GAME_HASHES) - n + i] & MASK64)
+    STATE.game_n = n
+
+
 def get_move(fen: str, time_left_ms: int) -> str:
     board = parse_fen(fen)
     moves, count = legal_moves(board)
@@ -1111,11 +1154,25 @@ def get_move(fen: str, time_left_ms: int) -> str:
     SEEN[key] = seen + 1
     STATE.avoid = PLAYED.get(key, NO_MOVE) if seen else NO_MOVE
 
+    # fold the position we were handed last move into the game trail, trim it to the reversible
+    # window (halfmove_clock plies precede this one with no pawn move or capture, so nothing
+    # older can recur), and load it for the search. game_reps() then counts real-game
+    # occurrences alongside the search path.
+    global _LAST_KEY
+    if _LAST_KEY:
+        GAME_HASHES.append(_LAST_KEY)
+    window = int(board.halfmove_clock)
+    if len(GAME_HASHES) > window:
+        del GAME_HASHES[: len(GAME_HASHES) - window]
+    load_game_hashes()
+    _LAST_KEY = 0  # set again only on a real-move return; a non-search reply carries nothing
+
     # critically low on time: don't search at all - even one depth-1 iteration could overrun
     # what this move has left. grab the best-looking move and return.
     if time_left_ms < PANIC_TIME_MS:
         best = panic_move(board)
         PLAYED[key] = best
+        _LAST_KEY = key
         return move_uci(best)
 
     try:
@@ -1128,6 +1185,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
         soft_cap = time_left_ms / SOFT_LIMIT / 1000
         best, _score = deepen(board, start, deadline, soft_cap, int(moves[0]))
         PLAYED[key] = int(best)
+        _LAST_KEY = key
 
         # nothing bounds the table's size mid-game the way a real fixed array would - clear it
         # if it has filled enough slots to be a memory concern.
@@ -1139,6 +1197,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
     
     except Exception as exc:  # numba failed to compile, or a bug in the port - hand off
         print(f"agent: numba search unavailable ({exc!r}); using the reference engine")
+        GAME_HASHES.clear()  # the reference engine's replies are not folded in; drop the trail
         return reference.get_move(fen, time_left_ms)
 
 
@@ -1153,6 +1212,7 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     STATE.aborted = 0
     STATE.deadline = time.monotonic() + 3600.0
     STATE.avoid = NO_MOVE
+    STATE.game_n = 0
     STATE.tt_depth[:] = -1
     STATE.tt_eval[:] = NO_EVAL
     STATE.history[:] = 0

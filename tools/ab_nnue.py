@@ -43,6 +43,10 @@ def reset_engine(engine: object) -> None:
     engine.STATE.avoid = engine.NO_MOVE
     if hasattr(engine.STATE, "tt_eval"):  # nnue engine caches the static eval in the TT
         engine.STATE.tt_eval[:] = engine.NO_EVAL
+    if hasattr(engine.STATE, "game_n"):  # nnue engine seeds the search with the game trail
+        engine.STATE.game_n = 0
+        engine.GAME_HASHES.clear()
+        engine._LAST_KEY = 0
     engine.SEEN.clear()
     engine.PLAYED.clear()
 
