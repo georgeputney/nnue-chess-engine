@@ -98,7 +98,7 @@ from move import (
 from move import (
     move_promotion_raw as move_promotion,
 )
-from nnue.accumulator import EG_MEN, evaluate_accumulator, popcount
+from nnue.accumulator import evaluate_accumulator, popcount
 from nnue.board import Board, copy_board, parse_fen
 from nnue.movegen import is_check, legal_moves, make_move
 from nnue.tablebase import COVERED_MATERIAL, TB_MEN, TB_NONE, best_tb_move, tb_score
@@ -140,6 +140,14 @@ NO_TB = MATE_SCORE + 1
 HARD_LIMIT = 4
 SOFT_LIMIT = 40
 SOFT_LIMIT_ENDGAME = 20
+# Men at or below which the endgame budget applies. Deliberately separate from EG_MEN, which
+# only says which net evaluates: round 97's thirty-move grind was played at 13-14 men, above the
+# net's threshold, on moves that moved the evaluation by single centipawns.
+ENDGAME_TIME_MEN = 16
+# The endgame hard cap. The soft cap only gates STARTING an iteration, so one begun just under it
+# runs on to the hard cap - in round 97 three consecutive moves each took 98% of a quarter of the
+# remaining clock and changed the evaluation by 3 cp, with 11 s left.
+HARD_LIMIT_ENDGAME = 4
 CHECK_EVERY = 1024        # poll the wall clock every this many nodes
 PANIC_TIME_MS = 300       # below this much left, skip the search and grab a move
 
@@ -1289,8 +1297,10 @@ def get_move(fen: str, time_left_ms: int) -> str:
         start = time.monotonic()
         # hard deadline to abort at - the 50 ms is slack for the node batch past the last clock
         # check plus move-gen and the reply; soft cap past which no new depth starts
-        deadline = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
-        soft_limit = SOFT_LIMIT_ENDGAME if popcount(board.occupancy[2]) <= EG_MEN else SOFT_LIMIT
+        endgame = popcount(board.occupancy[2]) <= ENDGAME_TIME_MEN
+        hard_limit = HARD_LIMIT_ENDGAME if endgame else HARD_LIMIT
+        soft_limit = SOFT_LIMIT_ENDGAME if endgame else SOFT_LIMIT
+        deadline = start + time_left_ms / hard_limit / 1000 - 0.05
         soft_cap = time_left_ms / soft_limit / 1000
         best, _score = deepen(board, start, deadline, soft_cap, int(moves[0]))
         PLAYED[key] = int(best)

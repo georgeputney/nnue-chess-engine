@@ -538,3 +538,36 @@ moved. That also re-confirms the standing rule: static error would have ranked t
 
 Next: `data/endgame_sf` (the 2.7M Stockfish-labelled positions alone, staged as shard_*.npz),
 100% of batches, warm from eg12m (`eg12p`) and from scratch (`eg12ps`), benched against eg12m.
+
+## Round 97 post-mortem and the time thresholds (2026-09-10 evening)
+
+The first rated game on the new build was a win, but it took 48 moves to convert from the point
+it was decisively won (+300 at move 61, mate at 109) and ended with 8.4 s on the clock. Two
+things showed up, and only one of them survived measurement.
+
+**The band above EG_MEN.** The thirty-move grind (moves 67-99) was played at 13-14 men, above
+the endgame net's threshold, so neither the net nor the endgame time budget applied to any of
+it. Splitting the time threshold out of EG_MEN and setting it to 16 is worth, at 30 s + 0.2 s
+from openings against a build identical but for that constant:
+
+| suite | score | Elo |
+|---|---|---|
+| openings (80) | +32 =31 -17, 59.4% | **+66 [+7, +129]** |
+| endgame (50) | +4 =43 -3, 51.0% | +7 [-29, +44] |
+
+Shipped as `ENDGAME_TIME_MEN = 16`. The endgame suite cannot see this change - it starts games
+from endgames with a full clock, so it neither reaches the 13-16 band often nor gets low on time.
+
+**The hard cap - rejected.** The soft cap only gates STARTING an iteration, so one begun just
+under it runs to the hard cap of 1/4 of the clock. In round 97 three consecutive moves took 98%
+of that with 11 s left and moved the evaluation by 3 cp, and move 74 spent 4.13 s to lose 82 cp.
+Halving the endgame hard cap to 1/8 measured +14 [-30, +58] on the endgame suite and **-22
+[-83, +38]** from openings - opposite signs, so noise, with the representative suite negative.
+`HARD_LIMIT_ENDGAME` stays at 4 (no change). Cutting a critical iteration short evidently costs
+about what the wasted time saves.
+
+**Not a problem:** the fifty-move clock peaked at 32 in a 108-move game. Distance steering stays
+dead. **Left undone:** raising the *net* threshold to 16 needs labelled data we do not have -
+`data/endgame_mix` is 3-9 men only, zero positions at 10-12 or 13-16, so the shipped net already
+extrapolates upward from 3-9. Extending it means new material templates in tools/label_eg.py and
+hours of labelling.
