@@ -41,6 +41,7 @@ Features (each carries a chessprogramming.org reference at its use site):
 
   Repetition handling
     - threefold repetition detected inside the search off a per-ply hash trail
+    - the fifty-move rule scored as the draw the referee claims, checkmate first
     - a first repetition scored as a draw so the search can steer into or away from it
     - a cross-call penalty on replaying the move chosen last time in this exact position, since
       each get_move rebuilds the board with no history and cannot otherwise see a real repeat
@@ -97,11 +98,15 @@ from move import (
 from move import (
     move_promotion_raw as move_promotion,
 )
-from nnue.accumulator import evaluate_accumulator, popcount
+from nnue.accumulator import EG_MEN, evaluate_accumulator, popcount
 from nnue.board import Board, copy_board, parse_fen
 from nnue.movegen import is_check, legal_moves, make_move
-from nnue.tablebase import best_tb_move
+from nnue.tablebase import COVERED_MATERIAL, TB_MEN, TB_NONE, best_tb_move, tb_score
 from zobrist import EP_FILE_KEYS, SIDE_KEY, zobrist_hash
+
+# sorted material keys we have a Syzygy table for (nnue.tablebase._material_key layout), frozen
+# into the jitted probe so an uncovered <= TB_MEN node skips the objmode call.
+TB_COVERED = np.array(COVERED_MATERIAL, dtype=np.int64)
 
 # rough centipawn values for move ordering and delta pruning only; indexed by bitboard piece id
 # (pawn 0 .. king 5), king 0 since it is never a victim.
@@ -120,10 +125,21 @@ MATE_SCORE = 1_000_000
 MAX_DEPTH = 64
 MATE_THRESHOLD = MATE_SCORE - 2 * MAX_DEPTH
 
+# a Syzygy win/loss in the search: far beyond any NNUE eval so the search always prefers it, but
+# below MATE_THRESHOLD so a real forced mate still outranks it and the mate-score plumbing leaves
+# it alone. NO_TB is outside every real score - tb_probe_score's "no tablebase answer" sentinel.
+TB_WIN_SCORE = MATE_SCORE - 2000
+NO_TB = MATE_SCORE + 1
+
 # time budget as clock fractions: at most 1/HARD_LIMIT of the clock on a move, and no new
-# deepening iteration once 1/SOFT_LIMIT of it is spent.
+# deepening iteration once 1/SOFT_LIMIT of it is spent. A flat fraction starves the endgame:
+# in the rated games (docs/nnue-plan.md post-mortem) the median spend fell from 2.85 s above 20
+# men to 0.47 s at 8 men or fewer while 15-40 s sat unused at the end, and every endgame loss
+# was played on sub-second moves. With EG_MEN men or fewer the soft cap loosens to
+# 1/SOFT_LIMIT_ENDGAME; the hard cap is unchanged.
 HARD_LIMIT = 4
 SOFT_LIMIT = 40
+SOFT_LIMIT_ENDGAME = 20
 CHECK_EVERY = 1024        # poll the wall clock every this many nodes
 PANIC_TIME_MS = 300       # below this much left, skip the search and grab a move
 
@@ -577,6 +593,43 @@ def order_key(is_tt: int, mvv: int, is_killer: int, hist: int) -> int:
 # jitted twin of reference.negamax; each pruning step carries its own reference there and here.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
+# Exact Syzygy score for a position with <= TB_MEN men, or NO_TB when the tables cannot answer
+# (too many men, or the child table is absent). A win/loss is ply-adjusted so the search still
+# prefers the faster one. objmode drops to nnue.tablebase.tb_score with the raw piece bitboards.
+@njit  # not cache=True: objmode
+def tb_probe_score(board: Board, ply: int) -> int:
+    if popcount(board.occupancy[2]) > TB_MEN:
+        return NO_TB
+
+    # material key (counts of P,N,B,R,Q per side, 3 bits each; colour-canonicalised) - skip the
+    # objmode probe entirely when we have no table for this ending.
+    white_key = np.int64(0)
+    black_key = np.int64(0)
+    for piece_type in range(5):  # pawn..queen, king excluded
+        white_key |= np.int64(popcount(board.pieces[0, piece_type])) << np.int64(3 * piece_type)
+        black_key |= np.int64(popcount(board.pieces[1, piece_type])) << np.int64(3 * piece_type)
+    key = white_key | (black_key << np.int64(15))
+    swapped = black_key | (white_key << np.int64(15))
+    if swapped < key:
+        key = swapped
+    lo = np.searchsorted(TB_COVERED, key)
+    if lo >= TB_COVERED.size or TB_COVERED[lo] != key:
+        return NO_TB
+
+    pieces = board.pieces
+    side = board.side
+    outcome = 0
+    with objmode(outcome="int64"):
+        outcome = tb_score(pieces, side)
+    if outcome == TB_NONE:
+        return NO_TB
+    if outcome > 0:
+        return TB_WIN_SCORE - ply
+    if outcome < 0:
+        return -TB_WIN_SCORE + ply
+    return 0  # exact draw; caller applies contempt
+
+
 @njit  # not cache=True: recursive + objmode
 def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int, ply: int) -> int:
     state.nodes += 1
@@ -611,6 +664,27 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
         return alpha
 
     in_check = is_check(board, board.side)
+
+    # fifty-move rule: the referee claims it, so a hundred halfmoves with no capture and no pawn
+    # move is a draw however won the position looks - and a tablebase probe answers as if the
+    # clock were zeroed, so this has to come first. Checkmate outranks the clock (a mate on the
+    # hundredth halfmove is a win), which is why the rare branch pays for a move generation.
+    # ref: https://www.chessprogramming.org/Fifty-move_Rule
+    if board.halfmove_clock >= 100:
+        _fifty_moves, fifty_count = legal_moves(board)
+
+        if in_check and fifty_count == 0:
+            return -MATE_SCORE + ply
+
+        return contempt_draw(ply)
+
+    # tablebase: an exact WDL for a <= TB_MEN position - ground truth in place of the net's
+    # saturated "winning-ish" number, so the search actually converts won endings and steers
+    # clear of tablebase draws. before the TT probe so a stale blind entry can't shadow it.
+    if popcount(board.occupancy[2]) <= TB_MEN:
+        tb = tb_probe_score(board, ply)
+        if tb != NO_TB:
+            return contempt_draw(ply) if tb == 0 else tb
 
     # recursion floor: a checking sequence extends every ply, so `depth` never falls - this
     # stops it running away. resolve no-legal-moves first so a mate isn't misjudged by the eval.
@@ -874,13 +948,33 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
 
     in_check = is_check(board, board.side)
 
+    # fifty-move rule: the referee claims it, so a hundred halfmoves with no capture and no pawn
+    # move is a draw however won the position looks - and a tablebase probe answers as if the
+    # clock were zeroed, so this has to come first. Checkmate outranks the clock (a mate on the
+    # hundredth halfmove is a win), which is why the rare branch pays for a move generation.
+    # ref: https://www.chessprogramming.org/Fifty-move_Rule
+    if board.halfmove_clock >= 100:
+        _fifty_moves, fifty_count = legal_moves(board)
+
+        if in_check and fifty_count == 0:
+            return -MATE_SCORE + ply
+
+        return contempt_draw(ply)
+
+    # tablebase: exact WDL for a <= TB_MEN position, same as negamax - qsearch is where a capture
+    # sequence collapses into a bare-piece ending, so it is the node that most needs the truth.
+    if popcount(board.occupancy[2]) <= TB_MEN:
+        tb = tb_probe_score(board, ply)
+        if tb != NO_TB:
+            return contempt_draw(ply) if tb == 0 else tb
+
     # recursion floor, matching negamax's - the only thing that bounds a checking sequence here.
     if ply >= MAX_DEPTH:
         _mv, count = legal_moves(board)
 
         if in_check and count == 0:
             return -MATE_SCORE + ply
-        
+
         return evaluate(board)
 
     # transposition-table probe: shared with negamax, so a capture sequence reached by two move
@@ -1196,7 +1290,8 @@ def get_move(fen: str, time_left_ms: int) -> str:
         # hard deadline to abort at - the 50 ms is slack for the node batch past the last clock
         # check plus move-gen and the reply; soft cap past which no new depth starts
         deadline = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
-        soft_cap = time_left_ms / SOFT_LIMIT / 1000
+        soft_limit = SOFT_LIMIT_ENDGAME if popcount(board.occupancy[2]) <= EG_MEN else SOFT_LIMIT
+        soft_cap = time_left_ms / soft_limit / 1000
         best, _score = deepen(board, start, deadline, soft_cap, int(moves[0]))
         PLAYED[key] = int(best)
         _LAST_KEY = key
@@ -1256,6 +1351,8 @@ def warm_up() -> None:
         see(capt, int(moves[j]))
         see_ge(capt, int(moves[j]), 0)
         move_ordering_score(capt, int(moves[j]))
+    # compile the in-search tablebase probe (objmode -> chess.syzygy) off the clock
+    tb_probe_score(parse_fen("8/8/8/4k3/8/3RK3/8/8 w - - 0 1"), 0)
 
 
 warm_up()

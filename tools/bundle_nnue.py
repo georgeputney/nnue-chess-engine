@@ -48,6 +48,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "candidates" / "nnue")
     parser.add_argument("--net", type=Path, default=ROOT / "nnue" / "net.npz")
+    parser.add_argument("--net-eg", type=Path, help="endgame net, shipped as net_eg.npz "
+                        "(nnue/accumulator.py EG_MEN); omit for a single-net bundle")
     parser.add_argument("--zip", action="store_true", help="also write submission.zip")
     args = parser.parse_args()
 
@@ -72,6 +74,10 @@ def main() -> None:
         shutil.copy2(ROOT / name, out / name)
 
     shutil.copy2(args.net, out / "net.npz")
+    if args.net_eg:
+        if not args.net_eg.is_file():
+            sys.exit(f"no endgame net at {args.net_eg}")
+        shutil.copy2(args.net_eg, out / "net_eg.npz")
 
     # the Syzygy tables tablebase.py mmaps, at the same relative path (syzygy/ beside the modules)
     syzygy = ROOT / "nnue" / "syzygy"

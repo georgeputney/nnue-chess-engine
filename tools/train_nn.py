@@ -188,6 +188,37 @@ def sigmoid(x: Tensor) -> Tensor:
     return torch.sigmoid(x)
 
 
+# re-iterate a small in-memory Batches forever (a fresh shuffle each pass), for --mix oversampling
+def endless(batches: Batches):
+    while True:
+        yield from batches
+
+
+# an epoch of the main batches with a --mix batch spliced in every `stride`, so ~`frac` of the
+# gradient steps see the mixed-in set (the low output buckets never get enough decisive endgames
+# from the Lichess corpus)
+def mixed_epoch(main, mix_gen, frac: float):
+    stride = max(1, round((1.0 - frac) / frac))
+    for i, item in enumerate(main, start=1):
+        yield item
+        if i % stride == 0:
+            yield next(mix_gen)
+
+
+# blended training loss. The wdl term (win-probability MSE) calibrates close positions; the cp
+# term adds gradient in the "already winning - by how much" regime where sigmoid(cp/400) has
+# flattened to ~1 and a pure-wdl net saturates (KQvK and K+2Q-vs-K score the same, the endgame
+# weakness). cp_weight 0 reproduces the old pure-wdl loss.
+def blended_loss(
+    pred: Tensor, wdl: Tensor, cp: Tensor, cp_weight: float, cp_clamp: float
+) -> Tensor:
+    loss = torch.mean((torch.sigmoid(pred) - wdl) ** 2)
+    if cp_weight > 0.0:
+        target = torch.clamp(cp, -cp_clamp, cp_clamp) / CP_SCALE  # pred is on the cp/400 scale
+        loss = loss + cp_weight * torch.mean((pred - target) ** 2)
+    return loss
+
+
 def evaluate_split(model: NNUE, batches: Batches | ShardStream) -> tuple[float, float]:
     """(wdl MSE, cp RMSE) over a split."""
     model.eval()
@@ -211,11 +242,23 @@ def main() -> None:
     parser.add_argument("--ft-out", type=int, default=256, help="accumulator width per colour")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch", type=int, default=16384)
+    parser.add_argument("--block", type=int, default=12,
+                        help="shard-stream: shards held in RAM at once (lower = less memory)")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--val-frac", type=float, default=0.05)
     parser.add_argument("--limit", type=int, default=0, help="cap positions (0 = all), for smoke")
     parser.add_argument("--patience", type=int, default=6, help="stop after N flat val epochs")
+    parser.add_argument("--mix", type=Path, help="extra .npz (or a dir of *.npz) oversampled "
+                        "into every epoch - decisive endgames the Lichess corpus lacks")
+    parser.add_argument("--mix-frac", type=float, default=0.15,
+                        help="fraction of training batches drawn from --mix")
+    parser.add_argument("--cp-weight", type=float, default=0.0,
+                        help="weight of the cp-magnitude loss term (0 = pure win-probability, "
+                        "the old behaviour; ~0.1 gives the eval room past 'winning')")
+    parser.add_argument("--cp-clamp", type=float, default=3000.0,
+                        help="clamp the cp label to +-this for the cp-magnitude term")
+    parser.add_argument("--init", type=Path, help="warm-start weights from this model.pt")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -227,10 +270,10 @@ def main() -> None:
     if args.npz.is_dir() and args.limit == 0:
         # stream the whole shard set from disk - too big for RAM
         train_batches: Batches | ShardStream = ShardStream(
-            args.npz, args.batch, device, val=False, seed=args.seed
+            args.npz, args.batch, device, block=args.block, val=False, seed=args.seed
         )
         val_batches: Batches | ShardStream = ShardStream(
-            args.npz, args.batch, device, val=True, seed=args.seed
+            args.npz, args.batch, device, block=args.block, val=True, seed=args.seed
         )
         print(f"streaming {len(train_batches.files):,} train / {len(val_batches.files):,} val "
               f"shards from {args.npz.name}  (~{train_batches.rows:,} train positions)")
@@ -246,9 +289,32 @@ def main() -> None:
         train_batches = Batches(packed, stm, wdl, cp, train_index, args.batch, device, shuffle=True)
         val_batches = Batches(packed, stm, wdl, cp, val_index, args.batch, device, shuffle=False)
 
+    mix_gen = None
+    if args.mix and args.mix_frac > 0:
+        files = sorted(args.mix.glob("*.npz")) if args.mix.is_dir() else [args.mix]
+        blobs = [np.load(f) for f in files]
+        mp = np.concatenate([b["packed"] for b in blobs])
+        ms = np.concatenate([b["stm"] for b in blobs])
+        mw = np.concatenate([b["wdl"] for b in blobs])
+        mc = np.concatenate([b["cp"] for b in blobs])
+        _, uniq = np.unique(mp, axis=0, return_index=True)  # de-dup across the mixed sets
+        mp, ms, mw, mc = mp[uniq], ms[uniq], mw[uniq], mc[uniq]
+        mix_batches = Batches(mp, ms, mw, mc, np.arange(len(mc)), args.batch, device, shuffle=True)
+        mix_gen = endless(mix_batches)
+        dec = float(np.mean(np.abs(mc) >= 800))
+        print(f"mixing {len(mc):,} positions ({dec:.0%} decisive) from {len(files)} file(s) "
+              f"at ~{args.mix_frac:.0%} of batches")
+
     model = NNUE(ft_out=args.ft_out).to(device)
+    if args.init:
+        ckpt = torch.load(args.init, map_location=device)
+        model.load_state_dict(ckpt["state_dict"])
+        prev = ckpt.get("val_mse", float("nan"))
+        print(f"warm-started from {args.init.name} (val_mse {prev:.5f})")
     optimiser = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=args.epochs)
+    if args.cp_weight > 0.0:
+        print(f"blended loss: wdl + {args.cp_weight} * cp-magnitude (clamp +-{args.cp_clamp:.0f})")
 
     best_val = float("inf")
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -259,10 +325,12 @@ def main() -> None:
         started = time.time()
         running = 0.0
         seen = 0
-        for own, other, out_bucket, wdl_batch, _cp_batch in train_batches:
+        epoch_iter = (train_batches if mix_gen is None
+                      else mixed_epoch(train_batches, mix_gen, args.mix_frac))
+        for own, other, out_bucket, wdl_batch, cp_batch in epoch_iter:
             optimiser.zero_grad(set_to_none=True)
             pred = model(own, other, out_bucket)
-            loss = torch.mean((sigmoid(pred) - wdl_batch) ** 2)
+            loss = blended_loss(pred, wdl_batch, cp_batch, args.cp_weight, args.cp_clamp)
             loss.backward()
             optimiser.step()
             running += loss.item() * own.shape[0]

@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 
 import nnue.agent as engine  # noqa: E402
 from nnue import net as netmod  # noqa: E402
-from nnue.accumulator import ACC_WIDTH, fill_accumulator  # noqa: E402
+from nnue.accumulator import ACC_WIDTH, EG_MEN, EG_WEIGHTS, WEIGHTS, fill_accumulator  # noqa: E402
 from nnue.movegen import legal_moves, make_move  # noqa: E402
 
 
@@ -46,15 +46,18 @@ def sample_positions(games: int, rng: random.Random) -> list[str]:
 
 
 def check_oracle(fens: list[str], tolerance: int) -> int:
-    weights = netmod.load()
     worst = 0
     fails = 0
     diffs = []
+    endgames = 0
     for fen in fens:
         board = engine.parse_fen(fen)
         got = int(engine.evaluate(board))
         packed, stm = netmod.encode_fen(fen)
-        want = float(netmod.forward_packed(packed, stm, weights)[0])
+        # the twin scores with the net the men count picks, as the engine does
+        endgame = chess.popcount(chess.Board(fen).occupied) <= EG_MEN
+        endgames += endgame
+        want = float(netmod.forward_packed(packed, stm, EG_WEIGHTS if endgame else WEIGHTS)[0])
         diff = abs(got - want)
         diffs.append(diff)
         worst = max(worst, diff)
@@ -63,8 +66,9 @@ def check_oracle(fens: list[str], tolerance: int) -> int:
             if fails <= 5:
                 print(f"  MISMATCH  engine {got:+6d}  numpy twin {want:+8.2f}  {fen}")
     print(
-        f"oracle check (engine vs numpy twin): {len(fens)} positions, "
-        f"mean |diff| {np.mean(diffs):.3f} cp, max {worst:.3f} cp, {fails} over {tolerance} cp"
+        f"oracle check (engine vs numpy twin): {len(fens)} positions ({endgames} with the "
+        f"endgame net), mean |diff| {np.mean(diffs):.3f} cp, max {worst:.3f} cp, "
+        f"{fails} over {tolerance} cp"
     )
     return fails
 

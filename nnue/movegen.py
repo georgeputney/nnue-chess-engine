@@ -67,7 +67,7 @@ from move import (
     move_promotion_raw,
     move_to_square,
 )
-from nnue.accumulator import fill_accumulator, update_feature
+from nnue.accumulator import EG_MEN, fill_accumulator, men_of, update_feature
 from nnue.board import Board, copy_board, parse_fen, recompute_occupancy
 from zobrist import CASTLING_KEYS, EP_FILE_KEYS, PIECE_SQUARE_KEYS, SIDE_KEY
 
@@ -650,35 +650,51 @@ def make_move(board: Board, move: int) -> Board:
     # every piece bitboard edit below is mirrored into new.acc by an update_feature call, so the
     # child accumulator is the parent's (copy_board carried it over) plus a handful of column
     # deltas instead of a full transformer pass. tools/verify_nnue.py checks this stays equal to
-    # a from-scratch fill after every move.
+    # a from-scratch fill after every move. The net is the one the child's men count picks: a
+    # capture that takes the board down to EG_MEN men crosses into the endgame net, whose
+    # accumulator has nothing in common with the parent's, so that child is filled from scratch
+    # once the pieces are placed (a few column adds - the board is small by then).
+    parent_men = men_of(board.pieces)
+    child_men = parent_men - 1 if (is_capture or is_en_passant) else parent_men
+    eg = child_men <= EG_MEN
+    crossing = eg and parent_men > EG_MEN
+
     new.pieces[colour, piece] &= clear_mask(from_square)
     key ^= PIECE_SQUARE_KEYS[colour, piece, from_square]
-    update_feature(new.acc, colour, piece, from_square, -1)
+    if not crossing:
+        update_feature(new.acc, colour, piece, from_square, -1, eg)
 
     if is_en_passant:
         new.pieces[enemy_colour, PAWN] &= clear_mask(captured_square)
         key ^= PIECE_SQUARE_KEYS[enemy_colour, PAWN, captured_square]
-        update_feature(new.acc, enemy_colour, PAWN, captured_square, -1)
+        if not crossing:
+            update_feature(new.acc, enemy_colour, PAWN, captured_square, -1, eg)
     elif is_capture:
         for piece_type in range(6):
 
             if new.pieces[enemy_colour, piece_type] & bit(to_square):
                 new.pieces[enemy_colour, piece_type] &= clear_mask(to_square)
                 key ^= PIECE_SQUARE_KEYS[enemy_colour, piece_type, to_square]
-                update_feature(new.acc, enemy_colour, piece_type, to_square, -1)
+                if not crossing:
+                    update_feature(new.acc, enemy_colour, piece_type, to_square, -1, eg)
                 break
 
     placed = piece if promotion == PROMOTION_NONE else promotion
     new.pieces[colour, placed] |= bit(to_square)
     key ^= PIECE_SQUARE_KEYS[colour, placed, to_square]
-    update_feature(new.acc, colour, placed, to_square, 1)
+    if not crossing:
+        update_feature(new.acc, colour, placed, to_square, 1, eg)
 
     if is_castle:
         new.pieces[colour, ROOK] &= clear_mask(rook_from)
         new.pieces[colour, ROOK] |= bit(rook_to)
         key ^= PIECE_SQUARE_KEYS[colour, ROOK, rook_from] ^ PIECE_SQUARE_KEYS[colour, ROOK, rook_to]
-        update_feature(new.acc, colour, ROOK, rook_from, -1)
-        update_feature(new.acc, colour, ROOK, rook_to, 1)
+        if not crossing:
+            update_feature(new.acc, colour, ROOK, rook_from, -1, eg)
+            update_feature(new.acc, colour, ROOK, rook_to, 1, eg)
+
+    if crossing:
+        fill_accumulator(new.pieces, new.acc)
 
     if piece == KING:
         if colour == WHITE:

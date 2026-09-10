@@ -19,6 +19,7 @@ count picks (nnue.arch.output_bucket).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,16 @@ from nnue.arch import BLACK, FEATURES, WHITE, black_perspective_perm, output_buc
 # built once: black_plane[:, i] == white_plane[:, PERM[i]]
 PERM = np.asarray(black_perspective_perm(), dtype=np.int64)
 
-DEFAULT_PATH = Path(__file__).resolve().parent / "net.npz"
+# The shipped net, unless NNUE_NET names another file: nnue.accumulator loads its weights at
+# import, so a candidate net can only be scored by pointing this at it before importing the
+# engine (tools/eg_suite.py --net does exactly that). Unset on the platform, where the only
+# net is the one in the zip. Pair it with NUMBA_CACHE_DIR - the jitted eval freezes these
+# weights into its on-disk cache.
+DEFAULT_PATH = Path(os.environ.get("NNUE_NET") or Path(__file__).resolve().parent / "net.npz")
+
+# The endgame net for positions with <= nnue.accumulator.EG_MEN men (NNUE_NET_EG overrides it
+# the same way). Optional: when the file is absent the main net serves every position.
+EG_PATH = Path(os.environ.get("NNUE_NET_EG") or Path(__file__).resolve().parent / "net_eg.npz")
 
 
 class Weights:
