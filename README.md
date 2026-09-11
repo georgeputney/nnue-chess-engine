@@ -64,7 +64,7 @@ engine/     the engine that played the competition - the only thing the platform
 stages/     the development arc: 01-material-1ply ... 07-numba-classical, 08-single-nnue
 bench/      how every claim here was measured, and how to reproduce it
 tools/      the offline training pipeline (data, Texel tuning, NNUE training/export)
-harness/    the competition's local runner/referee/clock, vendored, unmodified
+harness/    the competition's local runner/referee/clock, vendored, never edited independently
 docs/       the build log and the retrospective
 games/      the real competition record: results.csv and every game's PGN
 ```
@@ -88,7 +88,8 @@ discards it in rated games and shows it in the validation log.
 
 `harness/` - the local runner, referee, and clock that mirror the platform protocol - is the
 [AI Chessathon starter](https://github.com/advitrocks9/aichessathon-starter) by Advit Arora,
-used under the MIT License (see `LICENSE`), unmodified. Everything else is mine.
+used under the MIT License (see `LICENSE`), never edited independently of it (see
+`PROVENANCE.md` for the two upstream-sync commits). Everything else is mine.
 [`PROVENANCE.md`](PROVENANCE.md) has the full file-by-file split.
 
 ## The competition

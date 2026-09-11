@@ -1,7 +1,7 @@
 # Provenance
 
 An AI Chessathon entry, restructured after the competition ended into a portfolio repo. This
-file records what's mine and what's the competition's unmodified starter kit.
+file records what's mine and what's the competition's starter kit.
 
 ## My work
 
@@ -28,9 +28,11 @@ By Advit Arora, used under the MIT License (see `LICENSE`). Source:
 <https://github.com/advitrocks9/aichessathon-starter>
 
 - `harness/` - local runner, referee, clock, and match drivers that mirror the platform
-  protocol. **Unmodified.** The competition rules forbade editing it: changing it makes local
-  results meaningless, and that's still true for reproducing the numbers in `docs/` and
-  `games/`.
+  protocol. **Never modified independently** - the competition rules forbade that, since it
+  makes local results meaningless, and that's still true for reproducing the numbers in
+  `docs/` and `games/`. It was synced twice to the starter kit's own published updates as the
+  competition's rules changed (init budget, ply cap, draw-claim timing, upload limits) - both
+  commits pull directly from upstream, never a local edit.
 - `LICENSE`, `.gitignore` (most of it) - licence and ignores.
 
 `baselines/` (the starter's `random` / `greedy` / `minimax` / `numba` opponents) and the
@@ -40,9 +42,10 @@ of throwaway opponents.
 
 ## Verifying the split
 
-`git log -- harness/` shows only the initial commit - the one vendored piece has not been
-touched since. `git log -- engine/agent.py stages/` (and, before this restructure, `agent.py`
-and `nnue/`) is the full phase history of the engine, classical through NNUE.
+`git log -- harness/` shows the initial commit plus the two upstream-sync commits above, and
+nothing else - the one vendored piece has never been edited independently. `git log --follow
+-- engine/agent.py` (git mv preserves history through the restructure's renames) is the full
+phase history of the engine, classical through NNUE.
 
 ## What ships
 
