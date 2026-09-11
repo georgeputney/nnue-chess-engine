@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-# run from anywhere: put the repo root on the path so `import agent` finds the submission
+# run from anywhere: put the repo root on the path so `import engine.agent` (or --module) resolves
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -45,7 +45,7 @@ FENS: list[str] = [
 
 # searches every FEN to `depth` via <module>.bench_search, printing nodes / time / move / score
 # per position and a nps total. returns the rows for a snapshot or a compare
-def run(depth: int, module: str = "agent") -> list[Row]:
+def run(depth: int, module: str = "engine.agent") -> list[Row]:
     agent = importlib.import_module(module)
     if not hasattr(agent, "bench_search"):
         raise SystemExit(
@@ -98,16 +98,16 @@ def compare(rows: list[Row], baseline: list[Row]) -> int:
 
 
 # usage:
-#     uv run python tools/nodebench.py --depth 4
-#     uv run python tools/nodebench.py --depth 5 --baseline /tmp/nb.json
-#     uv run python tools/nodebench.py --depth 5 --baseline /tmp/nb.json --check
+#     uv run python bench/nodebench.py --depth 4
+#     uv run python bench/nodebench.py --depth 5 --baseline /tmp/nb.json
+#     uv run python bench/nodebench.py --depth 5 --baseline /tmp/nb.json --check
 #
 # no --baseline just prints the run; --baseline alone saves it; --baseline --check compares
 # and exits non-zero if any bestmove or score moved
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--depth", type=int, default=4)
-    parser.add_argument("--module", default="agent", help="engine module with bench_search")
+    parser.add_argument("--module", default="engine.agent", help="engine module with bench_search")
     parser.add_argument("--baseline", type=Path, help="snapshot to write, or read with --check")
     parser.add_argument("--check", action="store_true", help="compare this run against --baseline")
     args = parser.parse_args()

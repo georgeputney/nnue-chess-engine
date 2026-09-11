@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -88,7 +89,7 @@ def accumulators(packed: np.ndarray, stm: np.ndarray, weights: Weights) -> np.nd
 
 
 def clipped_relu(x: np.ndarray) -> np.ndarray:
-    return np.clip(x, 0.0, 1.0)
+    return cast(np.ndarray, np.clip(x, 0.0, 1.0))
 
 
 # output bucket per row from packed bitboards: total set bits is the piece count (the 12
@@ -111,7 +112,7 @@ def forward_from_accumulators(
     x = clipped_relu(x @ weights.l2_weight.T + weights.l2_bias)
     heads = x @ weights.out_weight.T + weights.out_bias  # [N, output_buckets]
     raw = heads[np.arange(heads.shape[0]), out_bucket]
-    return raw * weights.cp_scale
+    return cast(np.ndarray, raw * weights.cp_scale)
 
 
 # convenience: centipawns straight from packed bitboards + stm.

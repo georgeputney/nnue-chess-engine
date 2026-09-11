@@ -27,6 +27,9 @@ dev = ["mypy>=1.18", "ruff>=0.14"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# frozen historical snapshots and build artefacts (stages/README.md) - not maintained code,
+# same reasoning as mypy's `files` scoping below.
+extend-exclude = ["stages"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -34,16 +37,34 @@ ignore = ["N818"]
 
 [tool.mypy]
 strict = true
-files = ["agent.py", "reference.py", "harness"]
+files = ["engine/agent.py", "engine/reference.py", "harness"]
+explicit_package_bases = true
+mypy_path = "."
 
-# The @njit search and @jitclass state in agent.py cross the numba boundary, where mypy sees
-# opaque Dispatcher / _JITWrapper objects: recursive jitted calls, jitclass field reads and
-# the Board / SearchState return types trip checks that can't be satisfied without a wall of
-# per-line ignores. These codes are disabled for agent only; every other strict check, and all
-# of reference.py, still applies. The bitboard layer isn't type-checked (not in `files`).
+# bench/ and tools/ were never in scope either (same reasoning as the overrides below) - they're
+# measurement and training scripts, not the submission, and most predate this file existing.
+# stages/ holds frozen historical snapshots (see stages/README.md), each its own self-contained
+# agent.py / board.py / etc.; pointing mypy at the whole tree would see the same module name
+# defined many times over. Left untyped deliberately.
+
+# `files` only lists entry points, but strict mode applies in full to everything mypy follows
+# from them, including the rest of engine/ - so the numba boundary shows up wherever a jitted
+# call crosses it, not just in engine/agent.py. Each override below disables exactly the codes
+# that boundary trips (opaque Dispatcher / _JITWrapper objects, numpy scalar types where a
+# jitted signature says plain int) in the one file that needs it; every other strict check,
+# including on these same files, still applies.
 [[tool.mypy.overrides]]
-module = ["agent"]
+module = ["engine.agent"]
 disable_error_code = [
     "type-var", "call-arg", "operator", "arg-type", "attr-defined",
     "return-value", "no-any-return", "assignment", "index", "misc", "has-type",
+    "comparison-overlap",
 ]
+
+[[tool.mypy.overrides]]
+module = ["engine.accumulator"]
+disable_error_code = ["return-value", "arg-type"]
+
+[[tool.mypy.overrides]]
+module = ["engine.movegen"]
+disable_error_code = ["arg-type"]

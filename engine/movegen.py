@@ -396,11 +396,11 @@ def is_attacked(board: Board, square: int, by_colour: int) -> bool:
         return True
 
     bishops_queens = board.pieces[by_colour, BISHOP] | board.pieces[by_colour, QUEEN]
-    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:  # type: ignore[arg-type]
+    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:
         return True
 
     rooks_queens = board.pieces[by_colour, ROOK] | board.pieces[by_colour, QUEEN]
-    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)  # type: ignore[arg-type]
+    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)
 
 
 # is_check_reference, jitted - the hot-path check test the search calls every node.
@@ -527,9 +527,9 @@ def pseudo_legal_moves(board: Board) -> tuple[np.ndarray, int]:
                 )
                 count += 1
 
-        if ep_square != NO_SQUARE and PAWN_ATTACKS_NB[colour, from_square] & bit(ep_square):  # type: ignore[arg-type]
+        if ep_square != NO_SQUARE and PAWN_ATTACKS_NB[colour, from_square] & bit(ep_square):
             moves[count] = encode_move_nb(
-                from_square, ep_square, PAWN, PROMOTION_NONE, True, True, False, False  # type: ignore[arg-type]
+                from_square, ep_square, PAWN, PROMOTION_NONE, True, True, False, False
             )
             count += 1
 
@@ -612,7 +612,7 @@ def pseudo_legal_moves(board: Board) -> tuple[np.ndarray, int]:
                 from_square, to_square, KING, PROMOTION_NONE, is_capture, False, False, False
             )
             count += 1
-        count = castling_moves_nb(board, colour, from_square, occupied, moves, count)  # type: ignore[arg-type]
+        count = castling_moves_nb(board, colour, from_square, occupied, moves, count)
 
     return moves, count
 
@@ -757,11 +757,11 @@ def attacked_by_with_occ(board: Board, square: int, by_colour: int, occupied: in
         return True
     
     bishops_queens = board.pieces[by_colour, BISHOP] | board.pieces[by_colour, QUEEN]
-    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:  # type: ignore[arg-type]
+    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:
         return True
     
     rooks_queens = board.pieces[by_colour, ROOK] | board.pieces[by_colour, QUEEN]
-    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)  # type: ignore[arg-type]
+    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)
 
 
 # Legal moves, decided without playing them: compute once per position which enemy pieces check
@@ -787,8 +787,8 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
     # every enemy piece giving check right now
     checkers = KNIGHT_ATTACKS_NB[king_square] & board.pieces[them, KNIGHT]
     checkers |= PAWN_ATTACKS_NB[us, king_square] & board.pieces[them, PAWN]
-    checkers |= bishop_attacks(nb.uint8(king_square), occupied) & bishops_queens  # type: ignore[arg-type]
-    checkers |= rook_attacks(nb.uint8(king_square), occupied) & rooks_queens  # type: ignore[arg-type]
+    checkers |= bishop_attacks(nb.uint8(king_square), occupied) & bishops_queens
+    checkers |= rook_attacks(nb.uint8(king_square), occupied) & rooks_queens
 
     # squares a non-king move is allowed to land on: anywhere if not in check, the checker or a
     # blocking square if singly checked, nowhere (king must move) if doubly checked
@@ -804,8 +804,8 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
 
     # a piece is pinned when an enemy slider's path to the king is blocked by it alone
     pinned = nb.uint64(0)
-    snipers = rook_attacks(nb.uint8(king_square), enemy_occ) & rooks_queens  # type: ignore[arg-type]
-    snipers |= bishop_attacks(nb.uint8(king_square), enemy_occ) & bishops_queens  # type: ignore[arg-type]
+    snipers = rook_attacks(nb.uint8(king_square), enemy_occ) & rooks_queens
+    snipers |= bishop_attacks(nb.uint8(king_square), enemy_occ) & bishops_queens
     while snipers:
 
         sniper_square = lsb_index(snipers)
@@ -835,7 +835,7 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
             if move_is_capture(move):
                 test_occupied &= clear_mask(to_square)
 
-            if not attacked_by_with_occ(board, to_square, them, test_occupied):  # type: ignore[arg-type]
+            if not attacked_by_with_occ(board, to_square, them, test_occupied):
                 pseudo[legal_count] = move
                 legal_count += 1
 
@@ -845,7 +845,7 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
             continue
 
         if move_is_en_passant(move):
-            if not is_check(make_move(board, move), us):  # type: ignore[arg-type, type-var, call-arg]
+            if not is_check(make_move(board, move), us):  # type: ignore[type-var, call-arg]
                 pseudo[legal_count] = move
                 legal_count += 1
 

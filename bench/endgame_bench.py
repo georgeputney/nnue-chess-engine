@@ -1,12 +1,13 @@
-"""Endgame A/B - the sibling of tools/bench.py. Same fresh-process-per-game machinery and the
-same score / Elo / 95% band, but the start set is roughly level endgames instead of openings.
+"""Endgame A/B - the sibling of bench/openings_bench.py. Same fresh-process-per-game machinery
+and the same score / Elo / 95% band, but the start set is roughly level endgames instead of
+openings.
 
 Our openings hold up better than our endgames (see the game that went 1/2 a rook up), so this
 is the suite that should move when endgame play changes - king activity, passed pawns, contempt,
 pruning that is too greedy with few pieces on.
 
-    uv run python tools/endgame_bench.py --agent . --opponent snapshots/pre-contempt
-    uv run python tools/endgame_bench.py --agent . --opponent baselines/minimax \
+    uv run python bench/endgame_bench.py --agent stages/08-nnue --opponent stages/07-numba-classical
+    uv run python bench/endgame_bench.py --agent stages/08-nnue --opponent stages/01-material-1ply \
         --base-ms 8000 --increment-ms 100 --workers 4
 """
 
@@ -18,10 +19,10 @@ from pathlib import Path
 # run from anywhere: put the repo root on the path so `import harness` resolves
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# a fresh agent process per game (see tools/bench.py) - keep the import-time warm-up off
+# a fresh agent process per game (see bench/openings_bench.py) - keep the import-time warm-up off
 os.environ.setdefault("AGENT_WARM_UP_S", "0")
 
-from tools.bench import run_suite
+from bench.openings_bench import run_suite
 
 # Endgames that are drawn (or near-drawn) with best play but easy to spoil - what should move
 # when endgame play changes. Each was checked at depth 11: all but the three tagged below score

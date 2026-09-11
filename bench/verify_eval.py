@@ -1,5 +1,10 @@
 """Checks agent.evaluate (numba, on a Board) against reference.evaluate (plain, on a
 chess.Board) - bit-exact, across many positions from random games off several seeds.
+
+Only the classical tapered eval has a plain-python twin (reference.py); the shipped NNUE
+engine's equivalent check is bench/verify_nnue.py's oracle comparison against engine/net.py.
+So this checks the frozen classical build in stages/07-numba-classical, the numba port's own
+claim to bit-exactness against the reference.py it was ported from.
 """
 
 import random
@@ -7,12 +12,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-import chess  # noqa: E402
+CLASSICAL = ROOT / "stages" / "07-numba-classical"
+if str(CLASSICAL) not in sys.path:
+    sys.path.insert(0, str(CLASSICAL))
 
 import agent  # noqa: E402
+import chess  # noqa: E402
 import reference  # noqa: E402
 from board import from_chess_board  # noqa: E402
 

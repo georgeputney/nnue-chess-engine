@@ -17,8 +17,8 @@ if str(ROOT) not in sys.path:
 
 import chess  # noqa: E402
 
-from board import from_chess_board  # noqa: E402
-from movegen import legal_moves, legal_moves_reference  # noqa: E402
+from engine.board import from_chess_board  # noqa: E402
+from engine.movegen import legal_moves, legal_moves_reference  # noqa: E402
 
 GAMES = 60
 PLIES = 60

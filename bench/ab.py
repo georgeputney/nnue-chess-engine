@@ -1,11 +1,11 @@
 """In-process A/B: the numba agent vs the plain-python-chess reference engine, both colours
 from a set of near-level openings on a simulated clock. Prints score, Elo and a 95% band.
 
-Not a substitute for tools/bench.py's fresh-subprocess-per-game isolation - both engines share
-this interpreter - but it needs no wiring and is fast (the JIT warms once). Persistent state
-(transposition table, history, repetition dicts) is cleared between games.
+Not a substitute for bench/openings_bench.py's fresh-subprocess-per-game isolation - both
+engines share this interpreter - but it needs no wiring and is fast (the JIT warms once).
+Persistent state (transposition table, history, repetition dicts) is cleared between games.
 
-    uv run python tools/bb_ab.py [--openings N] [--base-ms MS] [--inc-ms MS]
+    uv run python bench/ab.py [--openings N] [--base-ms MS] [--inc-ms MS]
 """
 
 import argparse
@@ -20,9 +20,9 @@ if str(ROOT) not in sys.path:
 
 import chess  # noqa: E402
 
-import agent  # noqa: E402
-import reference  # noqa: E402
-from tools.bench import OPENINGS  # noqa: E402
+import engine.agent as agent  # noqa: E402
+import engine.reference as reference  # noqa: E402
+from bench.openings_bench import OPENINGS  # noqa: E402
 
 PLY_CAP = 600
 

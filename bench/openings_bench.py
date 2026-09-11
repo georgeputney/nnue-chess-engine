@@ -121,7 +121,7 @@ def elo(score: float) -> float:
 
 # fans the position x colour grid across a process pool, prints each game as it lands, then a
 # final score and Elo band. `kind` only labels the per-game line ("opening" / "endgame"). shared
-# with tools/endgame_bench.py, which passes its own position set. exits non-zero only via
+# with bench/endgame_bench.py, which passes its own position set. exits non-zero only via
 # one_game failures surfaced at the end
 def run_suite(
     agent: str,
@@ -187,9 +187,11 @@ def run_suite(
 
 
 # usage:
-#     uv run python tools/bench.py --agent . --opponent baselines/minimax
-#     uv run python tools/bench.py --agent . --opponent baselines/minimax \
-#         --openings 40 --base-ms 5000 --increment-ms 100 --workers 4
+#     uv run python bench/openings_bench.py --agent stages/08-nnue \
+#         --opponent stages/07-numba-classical
+#     uv run python bench/openings_bench.py --agent stages/08-nnue \
+#         --opponent stages/07-numba-classical --openings 40 --base-ms 5000 --increment-ms 100 \
+#         --workers 4
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", required=True)

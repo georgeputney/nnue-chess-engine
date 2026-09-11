@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from board import Board, parse_fen  # noqa: E402
-from movegen import (  # noqa: E402
+from engine.board import Board, parse_fen  # noqa: E402
+from engine.movegen import (  # noqa: E402
     legal_moves,
     legal_moves_reference,
     make_move,

@@ -1,12 +1,12 @@
-"""Check the numba NNUE engine against the plain-numpy forward in nnue/net.py, and check the
+"""Check the numba NNUE engine against the plain-numpy forward in engine/net.py, and check the
 accumulator that make_move carries against a from-scratch rebuild.
 
-    uv run python tools/verify_nnue.py [--positions 3000] [--games 60]
+    uv run python bench/verify_nnue.py [--positions 3000] [--games 60]
 
 Stage 2: make_move rebuilds the accumulator every node, so the accumulator check is trivially
 satisfied - it is the scaffold the stage-3 incremental update has to keep passing. The
 oracle check is the real one: it proves the int16 transformer + float tail, the feature
-orientation, and the centipawn scaling all match nnue/net.py, which in turn matches the trainer.
+orientation, and the centipawn scaling all match engine/net.py, which in turn matches the trainer.
 """
 
 from __future__ import annotations
@@ -23,10 +23,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import nnue.agent as engine  # noqa: E402
-from nnue import net as netmod  # noqa: E402
-from nnue.accumulator import ACC_WIDTH, EG_MEN, EG_WEIGHTS, WEIGHTS, fill_accumulator  # noqa: E402
-from nnue.movegen import legal_moves, make_move  # noqa: E402
+import engine.agent as engine  # noqa: E402
+from engine import net as netmod  # noqa: E402
+from engine.accumulator import (  # noqa: E402
+    ACC_WIDTH,
+    EG_MEN,
+    EG_WEIGHTS,
+    WEIGHTS,
+    fill_accumulator,
+)
+from engine.movegen import legal_moves, make_move  # noqa: E402
 
 
 # a spread of legal positions from lightly weighted random self-play, a few quiet ones per game

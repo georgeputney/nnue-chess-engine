@@ -15,9 +15,9 @@ if str(ROOT) not in sys.path:
 import chess  # noqa: E402
 import numpy as np  # noqa: E402
 
-from board import Board, from_chess_board  # noqa: E402
-from movegen import legal_moves, make_move  # noqa: E402
-from zobrist import zobrist_hash  # noqa: E402
+from engine.board import Board, from_chess_board  # noqa: E402
+from engine.movegen import legal_moves, make_move  # noqa: E402
+from engine.zobrist import zobrist_hash  # noqa: E402
 
 
 def main() -> None:
@@ -58,7 +58,7 @@ def main() -> None:
     # transposition: two knight moves out and back reaches the exact starting position again
     def find_move(pos: Board, uci: str) -> int:
         moves, count = legal_moves(pos)
-        from move import move_uci
+        from engine.move import move_uci
 
         for i in range(count):
             m = int(moves[i])

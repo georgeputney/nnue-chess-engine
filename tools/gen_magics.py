@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from attacks import (  # noqa: E402
+from engine.attacks import (  # noqa: E402
     BISHOP_DIRECTIONS,
     ROOK_DIRECTIONS,
     ray_attacks_reference,

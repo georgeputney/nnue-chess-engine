@@ -22,11 +22,16 @@ if str(ROOT) not in sys.path:
 
 import chess  # noqa: E402
 
-import agent  # noqa: E402
-import reference  # noqa: E402
-from board import from_chess_board  # noqa: E402
-from move import PROMOTION_NONE, move_from_square, move_promotion_raw, move_to_square  # noqa: E402
-from movegen import legal_moves  # noqa: E402
+import engine.agent as agent  # noqa: E402
+import engine.reference as reference  # noqa: E402
+from engine.board import from_chess_board  # noqa: E402
+from engine.move import (  # noqa: E402
+    PROMOTION_NONE,
+    move_from_square,
+    move_promotion_raw,
+    move_to_square,
+)
+from engine.movegen import legal_moves  # noqa: E402
 
 GAMES = 80
 PLIES = 70

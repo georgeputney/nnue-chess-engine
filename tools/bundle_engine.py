@@ -82,7 +82,8 @@ def main() -> None:
               f"{unzipped / 1024:.0f} KB unzipped)")
 
     rel = out.relative_to(ROOT) if out.is_relative_to(ROOT) else out
-    print(f"\n  uv run python bench/bench.py --agent {rel} --opponent stages/07-numba-classical")
+    print(f"\n  uv run python bench/openings_bench.py --agent {rel} "
+          f"--opponent stages/07-numba-classical")
 
 
 if __name__ == "__main__":

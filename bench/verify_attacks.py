@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import attacks as attacks  # noqa: E402  (path setup above must run first)
+import engine.attacks as attacks  # noqa: E402  (path setup above must run first)
 
 SAMPLES_PER_SQUARE = 300
 

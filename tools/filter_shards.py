@@ -1,6 +1,6 @@
 """Keep only the <= MAX_MEN positions of a shard directory, one output shard per input shard.
 
-The endgame net (nnue/net_eg.npz) is trained on this subset alone: 14.5% of the Lichess dump
+The endgame net (engine/net_eg.npz) is trained on this subset alone: 14.5% of the Lichess dump
 is 12 men or fewer, ~31M positions of the 215M, and a net that only ever sees them spends all
 its capacity there. Layout is unchanged (packed / stm / cp / wdl), so tools/train_nn.py reads
 the output directory as it reads the full one.

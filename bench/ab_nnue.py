@@ -1,14 +1,14 @@
-"""In-process A/B: the NNUE engine (nnue/agent.py) vs the current linear engine (agent.py),
-both colours from a set of near-level openings on a simulated clock. Prints score, Elo and a
-95% band.
+"""In-process A/B: the NNUE engine (engine/agent.py) vs the classical linear engine frozen in
+stages/07-numba-classical, both colours from a set of near-level openings on a simulated
+clock. Prints score, Elo and a 95% band.
 
-Same design and caveats as tools/ab.py - shared interpreter, JIT warms once, persistent state
+Same design and caveats as bench/ab.py - shared interpreter, JIT warms once, persistent state
 (transposition table, history, repetition dicts) cleared between games. Not a substitute for
-tools/bench.py's fresh-subprocess-per-game isolation; a quick read on whether the net is worth
-its slower nodes.
+bench/openings_bench.py's fresh-subprocess-per-game isolation; a quick read on whether the
+net is worth its slower nodes.
 
-    uv run python tools/ab_nnue.py [--openings N] [--base-ms MS] [--inc-ms MS]
-    uv run python tools/ab_nnue.py --openings N --depth D    # fixed depth, no clock
+    uv run python bench/ab_nnue.py [--openings N] [--base-ms MS] [--inc-ms MS]
+    uv run python bench/ab_nnue.py --openings N --depth D    # fixed depth, no clock
 
 --depth runs both engines to the same fixed search depth per move (via bench_search, clean
 table each move). It is deterministic and timing-free, so it isolates one question: is the
@@ -26,12 +26,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-import chess  # noqa: E402
+CLASSICAL = ROOT / "stages" / "07-numba-classical"
+if str(CLASSICAL) not in sys.path:
+    sys.path.insert(0, str(CLASSICAL))
 
 import agent as linear  # noqa: E402
-import nnue.agent as nnue  # noqa: E402
-from tools.bench import OPENINGS  # noqa: E402
+import chess  # noqa: E402
+
+import engine.agent as nnue  # noqa: E402
+from bench.openings_bench import OPENINGS  # noqa: E402
 
 PLY_CAP = 600
 

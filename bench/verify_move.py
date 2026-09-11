@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from move import (  # noqa: E402
+from engine.move import (  # noqa: E402
     encode_move,
     move_from_square,
     move_is_capture,

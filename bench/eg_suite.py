@@ -1,6 +1,6 @@
 """Endgame suite - where the NNUE static eval and the search fail, by piece count.
 
-The openings A/B and tools/endgame_bench.py (8-12 man rook endings) cannot see it: the net
+The openings A/B and bench/endgame_bench.py (8-12 man rook endings) cannot see it: the net
 rates K+R vs K at +57 cp. This generates endgame positions across material templates, labels
 each with Stockfish (best move + eval), and reports, per piece band:
 
@@ -8,8 +8,8 @@ each with Stockfish (best move + eval), and reports, per piece band:
   - move cp-loss: Stockfish's eval of its own best move minus its eval of the move our engine
     picks at a fixed depth  (the play-quality problem)
 
-    uv run python tools/eg_suite.py --positions 240 --sf-depth 18 --engine-depth 10
-    uv run python tools/eg_suite.py --module nnue.agent --positions 400
+    uv run python bench/eg_suite.py --positions 240 --sf-depth 18 --engine-depth 10
+    uv run python bench/eg_suite.py --module engine.agent --positions 400
 
 Judge net / search changes by the per-band numbers here; keep it as a veto (a regression in a
 band rejects the change even if the openings A/B likes it).
@@ -124,7 +124,7 @@ def build_suite(path: Path, n: int, seed: int, sf_depth: int, engine_path: str) 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--module", default="nnue.agent", help="engine module under test")
+    parser.add_argument("--module", default="engine.agent", help="engine module under test")
     parser.add_argument("--positions", type=int, default=240)
     parser.add_argument("--sf-depth", type=int, default=18, help="Stockfish label depth")
     parser.add_argument("--engine-depth", type=int, default=10, help="our fixed search depth")
@@ -133,9 +133,9 @@ def main() -> None:
                         "then exit (a fixed suite for reproducible A/B)")
     parser.add_argument("--suite", type=Path, help="score against a cached suite from --build "
                         "instead of generating fresh positions")
-    parser.add_argument("--net", help="score against this net.npz instead of nnue/net.npz")
+    parser.add_argument("--net", help="score against this net.npz instead of engine/net.npz")
     parser.add_argument("--tb", action="store_true",
-                        help="take the move from nnue.tablebase.best_tb_move when it answers "
+                        help="take the move from engine.tablebase.best_tb_move when it answers "
                         "(the 2-4 band); measures the Syzygy probe's move quality")
     args = parser.parse_args()
 
@@ -148,17 +148,17 @@ def main() -> None:
         return
 
     if args.net:
-        os.environ["NNUE_NET"] = str(Path(args.net).resolve())  # nnue.net reads this at import
-        # the njit funcs in nnue/accumulator.py freeze the net weights into their cache=True
+        os.environ["NNUE_NET"] = str(Path(args.net).resolve())  # engine.net reads this at import
+        # the njit funcs in engine/accumulator.py freeze the net weights into their cache=True
         # .nbc; point numba at a throwaway dir so this candidate net compiles fresh without
-        # clobbering (or reusing) the shipped nnue/__pycache__.
+        # clobbering (or reusing) the shipped engine/__pycache__.
         import tempfile
         os.environ["NUMBA_CACHE_DIR"] = tempfile.mkdtemp(prefix="egsuite_nb_")
     agent = importlib.import_module(args.module)
     best_tb_move = None
     if args.tb:
-        from nnue.tablebase import TB_MEN, best_tb_move
-        print(f"tablebase probe on: {Path(__file__).parent.parent / 'nnue' / 'syzygy'} "
+        from engine.tablebase import TB_MEN, best_tb_move
+        print(f"tablebase probe on: {Path(__file__).parent.parent / 'engine' / 'syzygy'} "
               f"(<= {TB_MEN} men)")
 
     rng = random.Random(args.seed)
