@@ -8,6 +8,9 @@ submission*.zip
 candidates/
 snapshots/
 .DS_Store
+# Claude Code instructions - local working notes, not part of the portfolio
+AGENTS.md
+CLAUDE.md
 
 # texel tuning: training corpus and the regenerable dataset cache
 data/
