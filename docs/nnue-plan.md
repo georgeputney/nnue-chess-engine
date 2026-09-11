@@ -1,3 +1,8 @@
+> **Historical.** The build log for the NNUE program, written as it happened; `nnue/` here is
+> now `engine/`, and `agent.py`'s linear tapered eval below is frozen at
+> [`stages/07-numba-classical`](../stages/07-numba-classical). See `docs/writeup.md` for the
+> narrative version, including the final result.
+
 # NNUE engine - roadmap
 
 Branch `nnue`. On this branch `agent.py` keeps the linear tapered eval; `nnue/agent.py` is the
