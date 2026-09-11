@@ -187,9 +187,9 @@ def run_suite(
 
 
 # usage:
-#     uv run python bench/openings_bench.py --agent stages/08-nnue \
+#     uv run python bench/openings_bench.py --agent stages/08-single-nnue \
 #         --opponent stages/07-numba-classical
-#     uv run python bench/openings_bench.py --agent stages/08-nnue \
+#     uv run python bench/openings_bench.py --agent stages/08-single-nnue \
 #         --opponent stages/07-numba-classical --openings 40 --base-ms 5000 --increment-ms 100 \
 #         --workers 4
 def main() -> None:

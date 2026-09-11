@@ -6,9 +6,10 @@ Our openings hold up better than our endgames (see the game that went 1/2 a rook
 is the suite that should move when endgame play changes - king activity, passed pawns, contempt,
 pruning that is too greedy with few pieces on.
 
-    uv run python bench/endgame_bench.py --agent stages/08-nnue --opponent stages/07-numba-classical
-    uv run python bench/endgame_bench.py --agent stages/08-nnue --opponent stages/01-material-1ply \
-        --base-ms 8000 --increment-ms 100 --workers 4
+    uv run python bench/endgame_bench.py --agent stages/08-single-nnue \
+        --opponent stages/07-numba-classical
+    uv run python bench/endgame_bench.py --agent stages/08-single-nnue \
+        --opponent stages/01-material-1ply --base-ms 8000 --increment-ms 100 --workers 4
 """
 
 import argparse
