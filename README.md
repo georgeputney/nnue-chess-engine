@@ -1,7 +1,7 @@
-# A hand-rolled NNUE chess engine
+# Talos
 
-A from-scratch chess engine — negamax, alpha-beta, a numba-compiled bitboard core, and a
-self-trained NNUE evaluation — built for [AI Chessathon](https://aichessathon.com), a
+A hand-rolled, from-scratch chess engine — negamax, alpha-beta, a numba-compiled bitboard core,
+and a self-trained NNUE evaluation — built for [AI Chessathon](https://aichessathon.com), a
 head-to-head engine competition run under a strict sandbox: one CPU core, 2 GB, no network, no
 GPU, 120 s + 0.5 s per move. **Final result: 2314 Elo, #48 of 465 entries (top 10%)** — up from
 a 1498 starting rating over 122 rated games (49W 23D 42L, 53.1% score); see

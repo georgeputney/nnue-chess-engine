@@ -1,6 +1,5 @@
 [project]
-# TODO: rename once the engine has a real name (also used as the Lichess BOT username)
-name = "nnue-chess-engine"
+name = "talos"
 version = "1.0.0"
 requires-python = ">=3.12"
 dependencies = [
