@@ -1,4 +1,4 @@
-# Talos
+# NNUE Chess Engine
 
 A hand-rolled, from-scratch chess engine - negamax, alpha-beta, a numba-compiled bitboard core,
 and a self-trained NNUE evaluation - built for [AI Chessathon](https://aichessathon.com), a
