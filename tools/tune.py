@@ -1,22 +1,28 @@
-"""Offline Texel tuner - fits the evaluation weights to game results and writes tables.py."""
+"""Offline tuner - fits the evaluation weights to engine scores (or game results) and writes
+tables.py. See main()'s comment for the objectives and the regularisation knobs."""
 
 import argparse
 import importlib
+import math
 import re
 import sys
 import time
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 
 import chess
 import numpy as np
 
-# run from anywhere: put the repo root on the path so `import agent` finds the submission
+# run from anywhere: put the repo root on the path so the engine modules resolve
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-agent = importlib.import_module("agent")
+# coefficients() introspects a python-chess board, so it mirrors reference.evaluate (the plain
+# engine) - which tools/verify_eval.py holds bit-identical to the jitted agent.evaluate, so a
+# fit against one is a fit against the other.
+reference = importlib.import_module("reference")
 tables = importlib.import_module("tables")
 
 # every eval term is `weight * count`, so the static score is linear in the weights:
@@ -27,61 +33,101 @@ tables = importlib.import_module("tables")
 #     mean((sigmoid(k * eval_cp / 400) - result) ** 2)
 # with the game result from white's point of view. only the fitted numbers ship.
 
-# 6 piece types x 64 squares of piece-square table, then one slot per scalar term. every slot
-# is fitted as a (midgame, endgame) pair, so there are two weight vectors of this length
-PST_PARAMS = 6 * 64
-MOBILITY_INDEX = {chess.BISHOP: PST_PARAMS, chess.ROOK: PST_PARAMS + 1, chess.QUEEN: PST_PARAMS + 2}
-KING_EXPOSURE_INDEX = PST_PARAMS + 3
-TEMPO_INDEX = PST_PARAMS + 4
-DOUBLED_INDEX = PST_PARAMS + 5
-PARAM_COUNT = PST_PARAMS + 6
+# far pawn (0) + pawn..king (1-6): 64 placement squares each (material is its own slot, not
+# folded in - PST_PARAMS is placement only), then one material slot per virtual piece type,
+# then the other scalar terms, then one PAWN_AHEAD slot per virtual piece type. every slot is
+# fitted as a (midgame, endgame) pair, so there are two weight vectors of this length
+PST_PARAMS = 7 * 64
+MATERIAL_BASE = PST_PARAMS  # + virtual piece type (0-6) -> 7 slots
+MOBILITY_INDEX = {chess.BISHOP: MATERIAL_BASE + 7, chess.ROOK: MATERIAL_BASE + 8,
+                  chess.QUEEN: MATERIAL_BASE + 9}
+KING_EXPOSURE_INDEX = MATERIAL_BASE + 10
+TEMPO_INDEX = MATERIAL_BASE + 11
+PAWN_AHEAD_BASE = MATERIAL_BASE + 12  # + virtual piece type (0-6) -> 7 slots
+# one passed-pawn slot per relative rank (0-7; a pawn only ever occupies 1-6), then the two
+# endgame-only king-activity scalars for an advanced passer
+PASSED_PAWN_BASE = PAWN_AHEAD_BASE + 7
+KING_PASSER_OWN_INDEX = PASSED_PAWN_BASE + 8
+KING_PASSER_ENEMY_INDEX = PASSED_PAWN_BASE + 9
+PARAM_COUNT = KING_PASSER_ENEMY_INDEX + 1
 
 
 # flat index into a weight vector for one piece-square entry. `square` is white's view
-# (a1 = 0), already mirrored for black by the caller
-def pst_index(piece_type: int, square: int) -> int:
-    return (piece_type - 1) * 64 + square
+# (a1 = 0), already mirrored for black by the caller. `virtual_type` is reference.FAR_PAWN (0)
+# or a real chess.PieceType (1-6) - the same indexing reference.evaluate uses for the PST.
+def pst_index(virtual_type: int, square: int) -> int:
+    return virtual_type * 64 + square
 
 
 # how many times each eval term applies in `board`, white minus black, plus the game phase.
-# mirrors agent.evaluate term for term - --selfcheck fails if this drifts
+# mirrors reference.evaluate term for term - --selfcheck fails if this drifts
 def coefficients(board: chess.Board) -> tuple[dict[int, int], int]:
     counts: dict[int, int] = defaultdict(int)
     occupied = board.occupied
 
+    white_pawns = board.pawns & board.occupied_co[chess.WHITE]
+    black_pawns = board.pawns & board.occupied_co[chess.BLACK]
+    king_sq = {colour: board.king(colour) for colour in (chess.WHITE, chess.BLACK)}
+    king_file = {
+        colour: (chess.square_file(sq) if (sq := king_sq[colour]) is not None else 4)
+        for colour in (chess.WHITE, chess.BLACK)
+    }
+    kings_known = king_sq[chess.WHITE] is not None and king_sq[chess.BLACK] is not None
+
     for square, piece in board.piece_map().items():
         piece_type = piece.piece_type
-        sign = 1 if piece.color == chess.WHITE else -1
-        table_square = square if piece.color == chess.WHITE else square ^ 56
+        colour = piece.color
+        sign = 1 if colour == chess.WHITE else -1
+        table_square = square if colour == chess.WHITE else square ^ 56
 
-        counts[pst_index(piece_type, table_square)] += sign
+        far = piece_type == chess.PAWN and (chess.square_file(square) ^ king_file[colour]) & 4
+        virtual_type = reference.FAR_PAWN if far else piece_type
+        counts[pst_index(virtual_type, table_square)] += sign      # placement
+        counts[MATERIAL_BASE + virtual_type] += sign                # material
 
         if piece_type in MOBILITY_INDEX:
             reach = chess.popcount(board.attacks_mask(square))
             counts[MOBILITY_INDEX[piece_type]] += sign * reach
         elif piece_type == chess.KING:
-            counts[KING_EXPOSURE_INDEX] += sign * agent.slider_scope(square, occupied)
+            counts[KING_EXPOSURE_INDEX] += sign * reference.slider_scope(square, occupied)
+
+        own_pawns = white_pawns if colour == chess.WHITE else black_pawns
+        stacked = reference.pawns_ahead(square, colour, own_pawns)
+        counts[PAWN_AHEAD_BASE + virtual_type] += sign * stacked
+
+        # passed pawn + king activity around an advanced one - mirrors reference.evaluate
+        if piece_type == chess.PAWN:
+            enemy_pawns = black_pawns if colour == chess.WHITE else white_pawns
+            if not enemy_pawns & reference.PASSED_MASK[colour][square]:
+                rank = chess.square_rank(square)
+                relative_rank = rank if colour == chess.WHITE else 7 - rank
+                counts[PASSED_PAWN_BASE + relative_rank] += sign
+
+                if relative_rank >= 4 and kings_known:
+                    stop = square + 8 if colour == chess.WHITE else square - 8
+                    own_dist = chess.square_distance(king_sq[colour], stop)
+                    enemy_dist = chess.square_distance(king_sq[not colour], stop)
+                    counts[KING_PASSER_OWN_INDEX] += sign * own_dist
+                    counts[KING_PASSER_ENEMY_INDEX] += sign * enemy_dist
 
     counts[TEMPO_INDEX] += 1 if board.turn == chess.WHITE else -1
 
-    white_pawns = board.pawns & board.occupied_co[chess.WHITE]
-    black_pawns = board.pawns & board.occupied_co[chess.BLACK]
-    counts[DOUBLED_INDEX] += agent.doubled_pawns(white_pawns) - agent.doubled_pawns(black_pawns)
-
-    return counts, agent.game_phase(board)
+    return counts, reference.game_phase(board)
 
 
-# weight vectors seeded from tables.py, so a run refines what agent.py already plays. the
+# weight vectors seeded from tables.py, so a run refines what the engine already plays. the
 # split scalars are already signed the way coefficients() expects (count is white minus
 # black, the weight carries the sign), so they copy straight across
 def initial_weights() -> tuple[np.ndarray, np.ndarray]:
     midgame = np.zeros(PARAM_COUNT, dtype=np.float64)
     endgame = np.zeros(PARAM_COUNT, dtype=np.float64)
 
-    for piece_type in range(1, 7):
+    for virtual_type in range(0, 7):
         for square in range(64):
-            midgame[pst_index(piece_type, square)] = tables.MIDGAME_TABLE[piece_type][square]
-            endgame[pst_index(piece_type, square)] = tables.ENDGAME_TABLE[piece_type][square]
+            midgame[pst_index(virtual_type, square)] = tables.MIDGAME_PST[virtual_type][square]
+            endgame[pst_index(virtual_type, square)] = tables.ENDGAME_PST[virtual_type][square]
+        midgame[MATERIAL_BASE + virtual_type] = tables.MATERIAL_MG[virtual_type]
+        endgame[MATERIAL_BASE + virtual_type] = tables.MATERIAL_EG[virtual_type]
 
     for piece_type, index in MOBILITY_INDEX.items():
         midgame[index] = tables.MOBILITY_WEIGHT_MG[piece_type]
@@ -91,8 +137,16 @@ def initial_weights() -> tuple[np.ndarray, np.ndarray]:
     endgame[KING_EXPOSURE_INDEX] = tables.KING_EXPOSURE_EG
     midgame[TEMPO_INDEX] = tables.TEMPO_MG
     endgame[TEMPO_INDEX] = tables.TEMPO_EG
-    midgame[DOUBLED_INDEX] = tables.DOUBLED_PAWN_MG
-    endgame[DOUBLED_INDEX] = tables.DOUBLED_PAWN_EG
+
+    for virtual_type in range(0, 7):
+        midgame[PAWN_AHEAD_BASE + virtual_type] = tables.PAWN_AHEAD_MG.get(virtual_type, 0)
+        endgame[PAWN_AHEAD_BASE + virtual_type] = tables.PAWN_AHEAD_EG.get(virtual_type, 0)
+
+    for relative_rank in range(8):
+        midgame[PASSED_PAWN_BASE + relative_rank] = tables.PASSED_PAWN_MG[relative_rank]
+        endgame[PASSED_PAWN_BASE + relative_rank] = tables.PASSED_PAWN_EG[relative_rank]
+    endgame[KING_PASSER_OWN_INDEX] = tables.KING_PASSER_OWN_EG
+    endgame[KING_PASSER_ENEMY_INDEX] = tables.KING_PASSER_ENEMY_EG
 
     return midgame, endgame
 
@@ -134,8 +188,9 @@ def parse_line(line: str) -> tuple[str, float] | None:
 
 
 # walk sources.csv (one line each: path, wdl-from-side-to-move 1/0, limit 0=all) and yield
-# every (fen, white-relative result) it points at
-def load_sources(csv_path: Path) -> Iterator[tuple[str, float]]:
+# every (fen, white-relative result, nan) it points at. text sources carry a game result only,
+# never an engine score, so the centipawn slot is nan and --target cp is unavailable for them
+def load_sources(csv_path: Path) -> Iterator[tuple[str, float, float]]:
     for raw in csv_path.read_text().splitlines():
         row = raw.strip()
 
@@ -157,28 +212,70 @@ def load_sources(csv_path: Path) -> Iterator[tuple[str, float]]:
             if side_relative and fen.split()[1] == "b":
                 result = 1.0 - result
 
-            yield fen, result
+            yield fen, result, math.nan
 
             kept += 1
             if limit and kept >= limit:
                 break
 
 
+# white-to-black order of the 12 bitboards label.py packs per position
+_BITBOARD_PIECES: list[tuple[int, chess.Color]] = [
+    (chess.PAWN, chess.WHITE), (chess.KNIGHT, chess.WHITE), (chess.BISHOP, chess.WHITE),
+    (chess.ROOK, chess.WHITE), (chess.QUEEN, chess.WHITE), (chess.KING, chess.WHITE),
+    (chess.PAWN, chess.BLACK), (chess.KNIGHT, chess.BLACK), (chess.BISHOP, chess.BLACK),
+    (chess.ROOK, chess.BLACK), (chess.QUEEN, chess.BLACK), (chess.KING, chess.BLACK),
+]
+
+
+# rebuild a board from the 12 packed bitboards (a1 = bit 0). castling and en passant are
+# not stored and do not matter to the static eval
+def _board_from_bitboards(bitboards: np.ndarray, white_to_move: bool) -> chess.Board:
+    board = chess.Board(None)
+    for (piece_type, color), bitboard in zip(_BITBOARD_PIECES, bitboards, strict=True):
+        mask = int(bitboard)
+        while mask:
+            square = (mask & -mask).bit_length() - 1
+            board.set_piece_at(square, chess.Piece(piece_type, color))
+            mask &= mask - 1
+    board.turn = chess.WHITE if white_to_move else chess.BLACK
+    return board
+
+
+# yield (board, white-relative wdl, white-relative centipawns) from a labelled .npz written by
+# tools/label.py. the stored wdl and cp are both from the side to move, so they are flipped
+# for black to move
+def load_npz(path: Path, limit: int = 0) -> Iterator[tuple[chess.Board, float, float]]:
+    blob = np.load(path)
+    stm, wdl, cp = blob["stm"], blob["wdl"], blob["cp"]
+    bitboards = blob["packed"].view("<u8")  # [N, 12]
+    count = bitboards.shape[0] if limit <= 0 else min(limit, bitboards.shape[0])
+
+    for index in range(count):
+        white_to_move = bool(stm[index])
+        sign = 1.0 if white_to_move else -1.0
+        wdl_white = float(wdl[index]) if white_to_move else 1.0 - float(wdl[index])
+        board = _board_from_bitboards(bitboards[index], white_to_move)
+        yield board, wdl_white, sign * float(cp[index])
+
+
 # turn positions into the sparse system: coo triplets (row, column, count) for the design
-# matrix, plus per-position phase and result. positions with the side to move in check are
-# dropped - the static eval is not meaningful there
+# matrix, plus per-position phase, white-relative wdl and white-relative centipawns. cp is nan
+# for text sources. positions with the side to move in check are dropped - the static eval is
+# not meaningful there
 def build_dataset(
-    samples: Iterator[tuple[str, float]], drop_in_check: bool = True
+    samples: Iterator[tuple[str | chess.Board, float, float]], drop_in_check: bool = True
 ) -> dict[str, np.ndarray]:
     rows: list[int] = []
     columns: list[int] = []
     values: list[int] = []
     phases: list[int] = []
     results: list[float] = []
+    results_cp: list[float] = []
 
     row = 0
-    for fen, result in samples:
-        board = chess.Board(fen)
+    for position, result, result_cp in samples:
+        board = position if isinstance(position, chess.Board) else chess.Board(position)
 
         if drop_in_check and board.is_check():
             continue
@@ -192,6 +289,7 @@ def build_dataset(
 
         phases.append(phase)
         results.append(result)
+        results_cp.append(result_cp)
 
         row += 1
         if row % 50_000 == 0:
@@ -203,6 +301,7 @@ def build_dataset(
         "values": np.asarray(values, dtype=np.float64),
         "phases": np.asarray(phases, dtype=np.float64),
         "results": np.asarray(results, dtype=np.float64),
+        "results_cp": np.asarray(results_cp, dtype=np.float64),
     }
 
 
@@ -225,43 +324,112 @@ def eval_cp(data: dict[str, np.ndarray], midgame: np.ndarray, endgame: np.ndarra
     return (phases * midgame_part + (24.0 - phases) * endgame_part) / 24.0
 
 
-def mean_squared_error(evals: np.ndarray, results: np.ndarray, k: float) -> float:
-    predicted = _sigmoid(k * evals / 400.0)
+Target = Literal["wdl", "cp"]
 
-    return float(np.mean((predicted - results) ** 2))
+
+# per-position (loss, d_loss/d_eval) for the chosen target. "wdl" compares sigmoid(k*eval/400)
+# to the game-result probability with a squared error. "cp" compares the eval straight to the
+# engine score with a Huber loss: unlike the sigmoid it does not saturate on lopsided
+# positions, so the lopsided positions keep contributing a gradient and piece values stay on
+# the engine's scale instead of collapsing
+def _loss_terms(
+    evals: np.ndarray, data: dict[str, np.ndarray], k: float, target: Target, delta: float
+) -> tuple[np.ndarray, np.ndarray]:
+    if target == "cp":
+        residual = evals - data["results_cp"]
+        abs_residual = np.abs(residual)
+        loss = np.where(
+            abs_residual <= delta, 0.5 * residual**2, delta * (abs_residual - 0.5 * delta)
+        )
+        return loss, np.clip(residual, -delta, delta)
+
+    predicted = _sigmoid(k * evals / 400.0)
+    residual = predicted - data["results"]
+    d_eval = 2.0 * residual * predicted * (1.0 - predicted) * (k / 400.0)
+    return residual**2, d_eval
+
+
+# mean objective over the positions picked out by `mask` (all of them if None)
+def mean_loss(
+    evals: np.ndarray,
+    data: dict[str, np.ndarray],
+    k: float,
+    target: Target,
+    delta: float,
+    mask: np.ndarray | None = None,
+) -> float:
+    loss, _ = _loss_terms(evals, data, k, target, delta)
+    return float(np.mean(loss if mask is None else loss[mask]))
+
+
+# root-mean-square eval error in centipawns, for a readable progress line under --target cp
+def cp_rmse(evals: np.ndarray, data: dict[str, np.ndarray], mask: np.ndarray) -> float:
+    residual = (evals - data["results_cp"])[mask]
+    return float(np.sqrt(np.mean(residual**2)))
 
 
 # scan for the k that best fits the current weights, so the sigmoid sits on the eval's scale
 # and tuning does not have to inflate the weights to compensate. wide range - a k that lands
-# on a scan edge means the weights are absorbing the rest of the scale
-def best_k(data: dict[str, np.ndarray], midgame: np.ndarray, endgame: np.ndarray) -> float:
+# on a scan edge means the weights are absorbing the rest of the scale. cp tuning has no
+# sigmoid, so k stays at 1.0
+def best_k(
+    data: dict[str, np.ndarray],
+    midgame: np.ndarray,
+    endgame: np.ndarray,
+    target: Target,
+    mask: np.ndarray | None = None,
+) -> float:
+    if target == "cp":
+        return 1.0
     evals = eval_cp(data, midgame, endgame)
-    results = data["results"]
     candidates = np.arange(0.5, 8.0, 0.02)
-    losses = [mean_squared_error(evals, results, k) for k in candidates]
+    losses = [mean_loss(evals, data, float(k), target, 0.0, mask) for k in candidates]
 
     return float(candidates[int(np.argmin(losses))])
 
 
 # closed-form gradient of the loss for each weight vector (no autograd). the chain is
-# loss -> sigmoid -> eval_cp, and d eval_cp / d weight is the phase-scaled design matrix, so
-# the transpose products are bincounts again
+# loss -> (sigmoid or identity) -> eval_cp, and d eval_cp / d weight is the phase-scaled
+# design matrix, so the transpose products are bincounts again. only positions in `train_mask`
+# contribute; `reg` is (midgame, endgame) L2 pulls back towards `seed`, the starting weights -
+# the endgame vector usually needs a firmer pull because a self-play set is short on real
+# endgames to constrain it. with `tune_scalars` false the six non-PST terms (mobility, king
+# exposure, tempo, doubled pawns) are held at their seed: their features are an order of
+# magnitude larger than a PST cell's, so a shared learning rate lets them soak up material
 def gradient(
-    data: dict[str, np.ndarray], midgame: np.ndarray, endgame: np.ndarray, k: float
+    data: dict[str, np.ndarray],
+    midgame: np.ndarray,
+    endgame: np.ndarray,
+    k: float,
+    target: Target,
+    delta: float,
+    train_mask: np.ndarray,
+    seed: tuple[np.ndarray, np.ndarray],
+    reg: tuple[float, float],
+    tune_scalars: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     rows, columns, values = data["rows"], data["columns"], data["values"]
-    phases, results = data["phases"], data["results"]
-    position_count = phases.shape[0]
+    phases = data["phases"]
+    train_count = int(train_mask.sum())
 
     evals = eval_cp(data, midgame, endgame)
-    predicted = _sigmoid(k * evals / 400.0)
-    d_loss_d_eval = (predicted - results) * predicted * (1.0 - predicted)
-    d_loss_d_eval *= (k / 400.0) * (2.0 / position_count)
+    _, d_loss_d_eval = _loss_terms(evals, data, k, target, delta)
+    d_loss_d_eval = d_loss_d_eval * train_mask / train_count
 
     midgame_terms = values * (d_loss_d_eval * phases / 24.0)[rows]
     endgame_terms = values * (d_loss_d_eval * (24.0 - phases) / 24.0)[rows]
     midgame_grad = np.bincount(columns, weights=midgame_terms, minlength=PARAM_COUNT)
     endgame_grad = np.bincount(columns, weights=endgame_terms, minlength=PARAM_COUNT)
+
+    reg_mg, reg_eg = reg
+    if reg_mg:
+        midgame_grad += (2.0 * reg_mg / PARAM_COUNT) * (midgame - seed[0])
+    if reg_eg:
+        endgame_grad += (2.0 * reg_eg / PARAM_COUNT) * (endgame - seed[1])
+
+    if not tune_scalars:
+        midgame_grad[PST_PARAMS:] = 0.0
+        endgame_grad[PST_PARAMS:] = 0.0
 
     return midgame_grad, endgame_grad
 
@@ -285,35 +453,94 @@ class Adam:
 
 
 # fit both weight vectors by Adam gradient descent, dropping the learning rate for the last
-# third. returns the fitted weights and the k used
+# third. a held-out split drives early stopping: the weights returned are the ones with the
+# lowest validation loss, not the last ones, so a long run cannot overfit the seed away.
+# returns the fitted weights and the k used
 def tune(
-    data: dict[str, np.ndarray], epochs: int, learning_rate: float
+    data: dict[str, np.ndarray],
+    epochs: int,
+    learning_rate: float,
+    *,
+    target: Target,
+    delta: float,
+    val_frac: float,
+    patience: int,
+    reg: tuple[float, float],
+    tune_scalars: bool,
+    seed: int,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     midgame, endgame = initial_weights()
-    k = best_k(data, midgame, endgame)
-    start_loss = mean_squared_error(eval_cp(data, midgame, endgame), data["results"], k)
-    print(f"k = {k:.3f}   start loss {start_loss:.6f}")
+    seed_weights = (midgame.copy(), endgame.copy())
+
+    position_count = data["phases"].shape[0]
+    rng = np.random.default_rng(seed)
+    is_val = np.zeros(position_count, dtype=bool)
+    val_count = int(val_frac * position_count)
+    if val_count:
+        is_val[rng.choice(position_count, val_count, replace=False)] = True
+    train_mask = ~is_val
+    val_mask = is_val if val_count else train_mask
+
+    k = best_k(data, midgame, endgame, target, train_mask)
+
+    def report(mask: np.ndarray) -> str:
+        evals = eval_cp(data, midgame, endgame)
+        objective = mean_loss(evals, data, k, target, delta, mask)
+        if target == "cp":
+            return f"{objective:.4f} ({cp_rmse(evals, data, mask):.1f}cp)"
+        return f"{objective:.6f}"
+
+    print(
+        f"target {target}   k = {k:.3f}   reg mg/eg {reg[0]}/{reg[1]}   "
+        f"scalars {'tuned' if tune_scalars else 'frozen'}\n"
+        f"  start   train {report(train_mask)}   val {report(val_mask)}   "
+        f"({int(train_mask.sum())} train / {int(val_mask.sum())} val)"
+    )
 
     midgame_adam = Adam(PARAM_COUNT)
     endgame_adam = Adam(PARAM_COUNT)
 
+    best_val = mean_loss(eval_cp(data, midgame, endgame), data, k, target, delta, val_mask)
+    best_weights = (midgame.copy(), endgame.copy())
+    stale = 0
+
     drop_at = epochs * 2 // 3
     for epoch in range(1, epochs + 1):
         rate = learning_rate if epoch < drop_at else learning_rate * 0.1
-        midgame_grad, endgame_grad = gradient(data, midgame, endgame, k)
+        midgame_grad, endgame_grad = gradient(
+            data, midgame, endgame, k, target, delta, train_mask, seed_weights, reg, tune_scalars
+        )
         midgame_adam.step(midgame, midgame_grad, epoch, rate)
         endgame_adam.step(endgame, endgame_grad, epoch, rate)
 
-        if epoch == drop_at:
+        if epoch == drop_at and target == "wdl":
             # weights have moved off the seed scale; re-fit k before the fine pass
-            k = best_k(data, midgame, endgame)
+            k = best_k(data, midgame, endgame, target, train_mask)
             print(f"  epoch {epoch:5d}   k re-fit to {k:.3f}")
 
         if epoch % 100 == 0 or epoch == epochs:
-            loss = mean_squared_error(eval_cp(data, midgame, endgame), data["results"], k)
-            print(f"  epoch {epoch:5d}   loss {loss:.6f}")
+            val_loss = mean_loss(
+                eval_cp(data, midgame, endgame), data, k, target, delta, val_mask
+            )
+            # a relative threshold, not an absolute one: an absolute 1e-12 against a loss in
+            # the tens of thousands is smaller than floating-point noise, so it never actually
+            # detects a plateau - every check reads as "improved" and patience never fires.
+            improved = val_loss < best_val * (1.0 - 1e-6)
+            if improved:
+                best_val, stale = val_loss, 0
+                best_weights = (midgame.copy(), endgame.copy())
+            else:
+                stale += 1
+            print(
+                f"  epoch {epoch:5d}   train {report(train_mask)}   "
+                f"val {report(val_mask)}{'  *' if improved else ''}"
+            )
+            if patience and stale >= patience:
+                print(f"  early stop: no val gain for {patience} checks")
+                break
 
-    return midgame, endgame, k
+    print(f"best val loss {best_val:.6f}")
+    return best_weights[0], best_weights[1], k
 
 
 def _round(value: float) -> int:
@@ -330,10 +557,11 @@ def _format_table(values: list[int]) -> str:
     return "[\n" + "\n".join(lines) + "\n    ]"
 
 
-# emit the fitted numbers as a tables.py, ready to drop in. piece-square tables are a1-first
-# with material folded in; the scalars come out split midgame / endgame
+# emit the fitted numbers as a tables.py, ready to drop in. material and placement are kept
+# as separate tables (not folded together), added at lookup time in evaluate(); the
+# scalars come out split midgame / endgame
 def dump_tables(midgame: np.ndarray, endgame: np.ndarray, out: Path | None) -> None:
-    names = {1: "pawn", 2: "knight", 3: "bishop", 4: "rook", 5: "queen", 6: "king"}
+    names = {0: "far_pawn", 1: "pawn", 2: "knight", 3: "bishop", 4: "rook", 5: "queen", 6: "king"}
     blocks = [
         '"""Texel-tuned evaluation weights. Generated by tools/tune.py; do not hand-edit."""',
         "",
@@ -341,15 +569,22 @@ def dump_tables(midgame: np.ndarray, endgame: np.ndarray, out: Path | None) -> N
         "",
     ]
 
-    for label, weights in (("MIDGAME", midgame), ("ENDGAME", endgame)):
-        blocks.append(f"{label}_TABLE: dict[chess.PieceType, list[int]] = {{")
+    for label, weights in (("MIDGAME_PST", midgame), ("ENDGAME_PST", endgame)):
+        blocks.append(f"{label}: dict[int, list[int]] = {{")
 
-        for piece_type in range(1, 7):
-            row = [_round(weights[pst_index(piece_type, square)]) for square in range(64)]
-            blocks.append(f"    {piece_type}: {_format_table(row)},  # {names[piece_type]}")
+        for virtual_type in range(0, 7):
+            row = [_round(weights[pst_index(virtual_type, square)]) for square in range(64)]
+            blocks.append(f"    {virtual_type}: {_format_table(row)},  # {names[virtual_type]}")
 
         blocks.append("}")
         blocks.append("")
+
+    for label, weights in (("MATERIAL_MG", midgame), ("MATERIAL_EG", endgame)):
+        entries = ", ".join(
+            f"{vt}: {_round(weights[MATERIAL_BASE + vt])}" for vt in range(0, 7)
+        )
+        blocks.append(f"{label}: dict[int, int] = {{{entries}}}")
+    blocks.append("")
 
     def scalar(index: int) -> tuple[int, int]:
         return _round(midgame[index]), _round(endgame[index])
@@ -359,7 +594,6 @@ def dump_tables(midgame: np.ndarray, endgame: np.ndarray, out: Path | None) -> N
     queen_mg, queen_eg = scalar(MOBILITY_INDEX[chess.QUEEN])
     king_mg, king_eg = scalar(KING_EXPOSURE_INDEX)
     tempo_mg, tempo_eg = scalar(TEMPO_INDEX)
-    doubled_mg, doubled_eg = scalar(DOUBLED_INDEX)
 
     blocks += [
         "MOBILITY_WEIGHT_MG: dict[chess.PieceType, int] = {",
@@ -373,8 +607,22 @@ def dump_tables(midgame: np.ndarray, endgame: np.ndarray, out: Path | None) -> N
         f"KING_EXPOSURE_EG = {king_eg}",
         f"TEMPO_MG = {tempo_mg}",
         f"TEMPO_EG = {tempo_eg}",
-        f"DOUBLED_PAWN_MG = {doubled_mg}",
-        f"DOUBLED_PAWN_EG = {doubled_eg}",
+        "",
+    ]
+
+    for label, weights in (("PAWN_AHEAD_MG", midgame), ("PAWN_AHEAD_EG", endgame)):
+        entries = ", ".join(
+            f"{vt}: {_round(weights[PAWN_AHEAD_BASE + vt])}" for vt in range(0, 7)
+        )
+        blocks.append(f"{label}: dict[int, int] = {{{entries}}}")
+    blocks.append("")
+
+    for label, weights in (("PASSED_PAWN_MG", midgame), ("PASSED_PAWN_EG", endgame)):
+        entries = ", ".join(str(_round(weights[PASSED_PAWN_BASE + rr])) for rr in range(8))
+        blocks.append(f"{label} = [{entries}]")
+    blocks += [
+        f"KING_PASSER_OWN_EG = {_round(endgame[KING_PASSER_OWN_INDEX])}",
+        f"KING_PASSER_ENEMY_EG = {_round(endgame[KING_PASSER_ENEMY_INDEX])}",
         "",
     ]
 
@@ -387,7 +635,9 @@ def dump_tables(midgame: np.ndarray, endgame: np.ndarray, out: Path | None) -> N
         print(f"wrote {out}")
 
 
-# opening / middlegame / endgame / black to move - enough spread to catch a sign or mirror bug
+# opening / middlegame / endgame / black to move - enough spread to catch a sign or mirror bug.
+# the last two carry an advanced passed pawn (own king near / enemy king near) so the passed
+# and king-activity terms are exercised, not just the material and placement ones.
 _SELFCHECK_FENS: list[str] = [
     chess.STARTING_FEN,
     "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2",
@@ -397,10 +647,12 @@ _SELFCHECK_FENS: list[str] = [
     "6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1",
     "8/2k5/2p5/2P5/8/8/6K1/8 b - - 0 1",
     "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2P2k2/2K5/8/8/8/8/8 w - - 0 1",
+    "8/6k1/8/8/8/1p6/2p5/6K1 b - - 0 1",
 ]
 
 
-# prove coefficients() plus initial_weights() reproduce agent.evaluate exactly. a mismatch
+# prove coefficients() plus initial_weights() reproduce reference.evaluate exactly. a mismatch
 # means the extraction has drifted from the eval and any tuning would fit the wrong model
 def selfcheck() -> int:
     midgame, endgame = initial_weights()
@@ -413,30 +665,47 @@ def selfcheck() -> int:
         midgame_total = sum(count * midgame[index] for index, count in counts.items())
         endgame_total = sum(count * endgame[index] for index, count in counts.items())
         mine = int(np.floor((phase * midgame_total + (24 - phase) * endgame_total) / 24.0))
-        reference = agent.evaluate(board, chess.WHITE)
+        want = reference.evaluate(board, chess.WHITE)
 
-        if mine != reference:
+        if mine != want:
             mismatches += 1
 
-        flag = "ok" if mine == reference else "MISMATCH"
-        print(f"  {flag:8s} mine {mine:6d}   evaluate {reference:6d}   {fen}")
-        
+        flag = "ok" if mine == want else "MISMATCH"
+        print(f"  {flag:8s} mine {mine:6d}   evaluate {want:6d}   {fen}")
+
     print("selfcheck passed" if not mismatches else f"{mismatches} mismatch(es)")
     return mismatches
 
 
 # usage:
 #     uv run python tools/tune.py --selfcheck
-#     uv run python tools/tune.py tools/sources.csv --out tools/tuned_tables.py
+#     uv run python tools/tune.py tools/sources.csv --target wdl --out tools/tuned_tables.py
+#     uv run python tools/tune.py --npz data/tune.npz --out tools/tuned_tables.py
 #
-# --selfcheck verifies the extraction against agent.evaluate and exits. with a sources file it
-# builds (and caches) the dataset, fits the weights, and prints or writes a tables.py
+# --selfcheck verifies the extraction against reference.evaluate and exits. otherwise it builds
+# (and caches) the dataset from a sources.csv or a labelled --npz, fits the weights, and
+# prints or writes a tables.py.
+#
+# --target cp (the default whenever the dataset carries engine scores) regresses the eval
+# straight onto the Stockfish centipawns with a Huber loss. --target wdl fits the old
+# sigmoid-to-result objective and is the only option for a text sources.csv. either way a
+# --val-frac slice is held out and the weights kept are the ones at the best validation loss.
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sources", nargs="?", type=Path, help="sources.csv listing the data files")
+    parser.add_argument("--npz", type=Path, help="labelled .npz from tools/label.py")
+    parser.add_argument("--limit", type=int, default=0, help="cap --npz positions, 0 = all")
     parser.add_argument("--selfcheck", action="store_true", help="verify the extraction, then exit")
-    parser.add_argument("--cache", type=Path, default=ROOT / "tools" / "tune_cache.npz")
+    parser.add_argument("--cache", type=Path, help="dataset cache path (defaults by input)")
     parser.add_argument("--rebuild", action="store_true", help="ignore any cached dataset")
+    parser.add_argument("--target", choices=("cp", "wdl"), help="fit objective (cp if present)")
+    parser.add_argument("--huber-delta", type=float, default=500.0, help="cp Huber knee, cp")
+    parser.add_argument("--val-frac", type=float, default=0.1, help="held-out fraction, early stop")
+    parser.add_argument("--patience", type=int, default=8, help="stop after N flat val checks")
+    parser.add_argument("--reg", type=float, default=0.2, help="L2 pull toward seed (midgame)")
+    parser.add_argument("--reg-eg", type=float, help="endgame L2 pull (default: 4x --reg)")
+    parser.add_argument("--tune-scalars", action="store_true", help="also fit the 6 scalar terms")
+    parser.add_argument("--seed", type=int, default=0, help="rng seed for the val split")
     parser.add_argument("--epochs", type=int, default=3000)
     parser.add_argument("--lr", type=float, default=1.0)
     parser.add_argument("--out", type=Path, help="write tables.py here instead of stdout")
@@ -445,21 +714,53 @@ def main() -> None:
     if args.selfcheck:
         raise SystemExit(1 if selfcheck() else 0)
 
-    if args.sources is None:
-        parser.error("pass sources.csv, or --selfcheck")
+    if (args.sources is None) == (args.npz is None):
+        parser.error("pass either sources.csv or --npz (and --selfcheck exits before here)")
 
-    if args.cache.exists() and not args.rebuild:
-        print(f"loading cached dataset {args.cache}")
-        loaded = np.load(args.cache)
+    source = args.npz if args.npz else args.sources
+    limit_suffix = f"_limit{args.limit}" if args.npz and args.limit else ""
+    cache = args.cache or ROOT / "tools" / f"tune_cache_{source.stem}{limit_suffix}.npz"
+
+    # keyed on the source file's name, not just "npz vs sources" - two different --npz
+    # datasets used to collide on the same tune_cache_npz.npz and silently serve each
+    # other's cached (and possibly stale) design matrix. the mtime check catches the same
+    # source path being regenerated with new content under an unchanged name.
+    fresh = cache.exists() and cache.stat().st_mtime >= source.stat().st_mtime
+    if fresh and not args.rebuild:
+        print(f"loading cached dataset {cache}")
+        loaded = np.load(cache)
         data = {key: loaded[key] for key in loaded.files}
+        if "results_cp" not in data:
+            parser.error(f"cached {cache.name} predates --target cp; re-run with --rebuild")
     else:
         print("building dataset")
         started = time.monotonic()
-        data = build_dataset(load_sources(args.sources))
-        np.savez(args.cache, **data)
+        samples: Iterator[tuple[str | chess.Board, float, float]] = (
+            load_npz(args.npz, args.limit) if args.npz else load_sources(args.sources)
+        )
+        data = build_dataset(samples)
+        np.savez(cache, **data)
         print(f"  {data['phases'].shape[0]} positions in {time.monotonic() - started:.1f}s")
 
-    midgame, endgame, _ = tune(data, args.epochs, args.lr)
+    has_scores = bool(np.isfinite(data["results_cp"]).all())
+    target: Target = args.target or ("cp" if has_scores else "wdl")
+    if target == "cp" and not has_scores:
+        parser.error("--target cp needs engine scores; this dataset has none (text source)")
+
+    reg_eg = 4.0 * args.reg if args.reg_eg is None else args.reg_eg
+
+    midgame, endgame, _ = tune(
+        data,
+        args.epochs,
+        args.lr,
+        target=target,
+        delta=args.huber_delta,
+        val_frac=args.val_frac,
+        patience=args.patience,
+        reg=(args.reg, reg_eg),
+        tune_scalars=args.tune_scalars,
+        seed=args.seed,
+    )
     dump_tables(midgame, endgame, args.out)
 
 

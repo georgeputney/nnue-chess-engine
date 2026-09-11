@@ -275,6 +275,67 @@ def see(board: chess.Board, move: chess.Move) -> int:
     return gain[0]
 
 
+# Is the static exchange evaluation of `move` at least `threshold`? The same swap as see(),
+# carried as one running balance so there is no gain[] list to build - the jitted agent.see_ge
+# is the one that matters, this is its mirror. see_ge(m, t) == (see(m) >= t) by construction;
+# tools/verify_see.py checks it. agent.see_ge.
+# ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
+def see_ge(board: chess.Board, move: chess.Move, threshold: int) -> bool:
+    to = move.to_square
+    occ = board.occupied & ~chess.BB_SQUARES[move.from_square]
+
+    if board.is_en_passant(move):
+        occ &= ~chess.BB_SQUARES[to + (-8 if board.turn == chess.WHITE else 8)]
+        captured_value = SEE_VALUE[chess.PAWN]
+    else:
+        victim = board.piece_at(to)
+        captured_value = SEE_VALUE[victim.piece_type] if victim else 0
+
+    # balance = what the side to move is up if the exchange stops here, less the threshold
+    balance = captured_value - threshold
+    if balance < 0:
+        return False  # winning the victim outright still falls short
+
+    from_piece = board.piece_at(move.from_square)
+    balance = (SEE_VALUE[from_piece.piece_type] if from_piece else 0) - balance
+    if balance <= 0:
+        return True  # losing the moved piece to the first recapture still clears the bar
+
+    side = not board.turn  # side to recapture next
+    result = 1             # 1 while the exchange stands in the original mover's favour
+    attackers = attackers_to(board, to, occ)
+
+    while True:
+        mine = attackers & board.occupied_co[side] & occ
+        found_pt = 0
+        found_sq = -1
+        for piece_type in range(chess.PAWN, chess.KING + 1):  # least valuable attacker still up
+            subset = mine & board.pieces_mask(piece_type, side)
+            if subset:
+                found_sq = chess.lsb(subset)
+                found_pt = piece_type
+                break
+        if found_sq < 0:
+            break
+
+        result ^= 1
+        if found_pt == chess.KING:
+            # a king recaptures only onto a square the far side no longer attacks
+            if attackers & board.occupied_co[not side] & occ:
+                result ^= 1
+            break
+
+        balance = SEE_VALUE[found_pt] - balance
+        if balance < result:
+            break
+
+        occ &= ~chess.BB_SQUARES[found_sq]
+        attackers = attackers_to(board, to, occ)
+        side = not side
+
+    return result == 1
+
+
 # Squares a queen on `square` would attack through `occupied` - used from the king's square
 # as a king-exposure proxy. board.attacks() only does the piece actually on the square.
 def slider_scope(square: chess.Square, occupied: chess.Bitboard) -> int:
@@ -829,7 +890,7 @@ def quiescence_search(board: chess.Board, alpha: int, beta: int, ply: int) -> in
             # ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
             attacker = board.piece_at(move.from_square)
             attacker_value = PIECE_VALUE.get(attacker.piece_type, 0) if attacker else 0
-            if attacker_value > victim and see(board, move) < 0:
+            if attacker_value > victim and not see_ge(board, move, 0):
                 continue
 
             # delta pruning: if winning this piece plus a margin still falls short of alpha,

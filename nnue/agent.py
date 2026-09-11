@@ -41,19 +41,19 @@ Features (each carries a chessprogramming.org reference at its use site):
 
   Repetition handling
     - threefold repetition detected inside the search off a per-ply hash trail
+    - the fifty-move rule scored as the draw the referee claims, checkmate first
     - a first repetition scored as a draw so the search can steer into or away from it
     - a cross-call penalty on replaying the move chosen last time in this exact position, since
       each get_move rebuilds the board with no history and cannot otherwise see a real repeat
 
-  Evaluation (weights from tools/tune.py)
-    - tapered midgame / endgame blend by game phase
-    - material and piece-square tables kept as two separate tuned tables
-    - slider mobility (bishop / rook / queen)
-    - king safety as a phantom-queen exposure count from the king square
-    - a doubled / stacked-pawn term generalised to a per-piece-type "friendly pawns ahead" term
-    - a far-pawn virtual piece type: a pawn on the far side of the board from its own king
-      scores on its own row (pawn storm / weak shelter)
-    - tempo bonus
+  Evaluation (NNUE - nnue/accumulator.py, weights nnue/net.npz from tools/train_nn.py)
+    - dual-perspective piece-placement net: 768 -> 256 feature transformer per colour, then a
+      512 -> 32 -> 32 -> 1 tail over [own-to-move, other] with clipped-ReLU activations
+    - the transformer output is an int32 accumulator carried on the Board; make_move keeps it
+      in step so a leaf eval is just the small float tail (stage 3), rebuilt from scratch here
+      in stage 2
+    - trained on Stockfish-labelled Lichess positions; only the net we trained ships, no engine
+      or borrowed net
 
   Time management and safety
     - hard cap per move plus a soft cap past which no new depth starts
@@ -78,17 +78,14 @@ from numba import njit, objmode
 from numba.experimental import jitclass
 
 import reference
-import tables
 from attacks import (
     KING_ATTACKS_NB,
     KNIGHT_ATTACKS_NB,
     PAWN_ATTACKS_NB,
     bishop_attacks,
-    queen_attacks,
     rook_attacks,
 )
 from bitboard import BISHOP, BLACK, KING, KNIGHT, NO_SQUARE, PAWN, QUEEN, ROOK, WHITE, lsb_index
-from board import Board, copy_board, parse_fen
 from move import (
     PROMOTION_NONE,
     move_from_square,
@@ -101,15 +98,15 @@ from move import (
 from move import (
     move_promotion_raw as move_promotion,
 )
-from movegen import is_check, legal_moves, make_move
+from nnue.accumulator import evaluate_accumulator, popcount
+from nnue.board import Board, copy_board, parse_fen
+from nnue.movegen import is_check, legal_moves, make_move
+from nnue.tablebase import COVERED_MATERIAL, TB_MEN, TB_NONE, best_tb_move, tb_score
 from zobrist import EP_FILE_KEYS, SIDE_KEY, zobrist_hash
 
-# virtual piece type: a pawn on the far side of the board from its own king scores on its own
-# material / PST / pawn-ahead row instead of PAWN's - a cheap pawn-storm / weak-shelter signal.
-# tables.py numbers real pieces the python-chess way (pawn 1 .. king 6); the bitboard layer
-# numbers them 0..5, so a real piece's virtual type is its bitboard id + 1.
-# ref: https://www.chessprogramming.org/Pawn_Structure
-FAR_PAWN = 0
+# sorted material keys we have a Syzygy table for (nnue.tablebase._material_key layout), frozen
+# into the jitted probe so an uncovered <= TB_MEN node skips the objmode call.
+TB_COVERED = np.array(COVERED_MATERIAL, dtype=np.int64)
 
 # rough centipawn values for move ordering and delta pruning only; indexed by bitboard piece id
 # (pawn 0 .. king 5), king 0 since it is never a victim.
@@ -128,10 +125,29 @@ MATE_SCORE = 1_000_000
 MAX_DEPTH = 64
 MATE_THRESHOLD = MATE_SCORE - 2 * MAX_DEPTH
 
+# a Syzygy win/loss in the search: far beyond any NNUE eval so the search always prefers it, but
+# below MATE_THRESHOLD so a real forced mate still outranks it and the mate-score plumbing leaves
+# it alone. NO_TB is outside every real score - tb_probe_score's "no tablebase answer" sentinel.
+TB_WIN_SCORE = MATE_SCORE - 2000
+NO_TB = MATE_SCORE + 1
+
 # time budget as clock fractions: at most 1/HARD_LIMIT of the clock on a move, and no new
-# deepening iteration once 1/SOFT_LIMIT of it is spent.
+# deepening iteration once 1/SOFT_LIMIT of it is spent. A flat fraction starves the endgame:
+# in the rated games (docs/nnue-plan.md post-mortem) the median spend fell from 2.85 s above 20
+# men to 0.47 s at 8 men or fewer while 15-40 s sat unused at the end, and every endgame loss
+# was played on sub-second moves. With EG_MEN men or fewer the soft cap loosens to
+# 1/SOFT_LIMIT_ENDGAME; the hard cap is unchanged.
 HARD_LIMIT = 4
 SOFT_LIMIT = 40
+SOFT_LIMIT_ENDGAME = 20
+# Men at or below which the endgame budget applies. Deliberately separate from EG_MEN, which
+# only says which net evaluates: round 97's thirty-move grind was played at 13-14 men, above the
+# net's threshold, on moves that moved the evaluation by single centipawns.
+ENDGAME_TIME_MEN = 16
+# The endgame hard cap. The soft cap only gates STARTING an iteration, so one begun just under it
+# runs on to the hard cap - in round 97 three consecutive moves each took 98% of a quarter of the
+# remaining clock and changed the evaluation by 3 cp, with 11 s left.
+HARD_LIMIT_ENDGAME = 4
 CHECK_EVERY = 1024        # poll the wall clock every this many nodes
 PANIC_TIME_MS = 300       # below this much left, skip the search and grab a move
 
@@ -171,69 +187,35 @@ CONTEMPT = 30             # cp a draw is worth to us, negated: the search plays 
 LMP = np.array([3 + d * d for d in range(LMP_MAX_DEPTH + 1)], dtype=np.int64)  # quiet cap by depth
 NO_MOVE = -1
 
-# tables.py's dicts flattened to virtual-type-indexed (0..6) numpy arrays for the jitted
-# evaluate(). tables numbers virtual types 0 = far pawn, 1..6 = pawn..king; imported via
-# `import tables` so these array names don't collide with the source dicts.
-KING_EXPOSURE_MG = tables.KING_EXPOSURE_MG
-KING_EXPOSURE_EG = tables.KING_EXPOSURE_EG
-TEMPO_MG = tables.TEMPO_MG
-TEMPO_EG = tables.TEMPO_EG
+# sentinel in the TT's static-eval slot for "not computed here". Out of band: real evals sit
+# near +/- a few thousand cp, mate scores at +/- MATE_SCORE (1e6).
+NO_EVAL = 1 << 30
 
-MATERIAL_MG = np.array([tables.MATERIAL_MG[vt] for vt in range(7)], dtype=np.int64)
-MATERIAL_EG = np.array([tables.MATERIAL_EG[vt] for vt in range(7)], dtype=np.int64)
-MIDGAME_PST = np.array([tables.MIDGAME_PST[vt] for vt in range(7)], dtype=np.int64)   # (7, 64)
-ENDGAME_PST = np.array([tables.ENDGAME_PST[vt] for vt in range(7)], dtype=np.int64)
-PAWN_AHEAD_MG = np.array([tables.PAWN_AHEAD_MG.get(vt, 0) for vt in range(7)], dtype=np.int64)
-PAWN_AHEAD_EG = np.array([tables.PAWN_AHEAD_EG.get(vt, 0) for vt in range(7)], dtype=np.int64)
-# passed-pawn bonus indexed by relative rank (0..7, how far the pawn has advanced toward
-# promotion), and the endgame-only king-activity weights for an advanced passer.
-PASSED_PAWN_MG = np.array(tables.PASSED_PAWN_MG, dtype=np.int64)
-PASSED_PAWN_EG = np.array(tables.PASSED_PAWN_EG, dtype=np.int64)
-KING_PASSER_OWN_EG = tables.KING_PASSER_OWN_EG
-KING_PASSER_ENEMY_EG = tables.KING_PASSER_ENEMY_EG
-# mobility weight per virtual type (only bishop / rook / queen non-zero); phase weight per
-# bitboard piece id (knight / bishop 1, rook 2, queen 4).
-MOBILITY_MG = np.zeros(7, dtype=np.int64)
-MOBILITY_EG = np.zeros(7, dtype=np.int64)
-for piece_type, weight in tables.MOBILITY_WEIGHT_MG.items():
-    MOBILITY_MG[piece_type] = weight
-for piece_type, weight in tables.MOBILITY_WEIGHT_EG.items():
-    MOBILITY_EG[piece_type] = weight
-PHASE_WEIGHT = np.array((0, 1, 1, 2, 4, 0), dtype=np.int64)
+# kill switch for the TT static-eval cache. On (1) the search reuses a TT key match's stored
+# NNUE eval instead of recomputing; evaluate is pure in (acc, side) so this is exact - move,
+# score and node count are identical to the recompute path, only wall time drops. Kept as a
+# constant so tools/nodebench.py can prove the equivalence by flipping it.
+EVAL_CACHE = 1
 
-FULL_BB = np.uint64((1 << 64) - 1)
-
-
-# PASSED_MASK[colour][square]: the squares an enemy pawn would have to stand on to stop `square`
-# being a passed pawn - `square`'s own file and the two adjacent files, on every rank ahead of
-# it toward promotion. Built once in plain Python and frozen for the jitted evaluate().
-# ref: https://www.chessprogramming.org/Passed_Pawn
-def build_passed_masks() -> np.ndarray:
-    masks = np.zeros((2, 64), dtype=np.uint64)
-    for square in range(64):
-        file = square & 7
-        rank = square >> 3
-        files = 0
-        for adjacent in (file - 1, file, file + 1):
-            if 0 <= adjacent <= 7:
-                files |= 0x0101_0101_0101_0101 << adjacent
-        white_ahead = 0
-        for r in range(rank + 1, 8):
-            white_ahead |= 0xFF << (8 * r)
-        black_ahead = 0
-        for r in range(rank):
-            black_ahead |= 0xFF << (8 * r)
-        masks[WHITE, square] = np.uint64(files & white_ahead)
-        masks[1, square] = np.uint64(files & black_ahead)
-    return masks
-
-
-PASSED_MASK = build_passed_masks()
+# The static evaluation is the NNUE forward pass over the Board's accumulator - see
+# nnue/accumulator.py (evaluate below is a one-line wrapper). None of the linear eval's tuned
+# tables, phase blend, or hand-built pawn masks survive the switch. The NNUE forward is heavier
+# than the old linear eval, so its result is cached in the TT (tt_eval) and reused whenever the
+# search revisits a position - evaluate is pure in (acc, side), so a cache hit is exact.
 
 # per-game anti-repetition, keyed by zobrist hash: how many times we have been asked to move in
 # a position, and what we chose there last (reference.py keeps SEEN / PLAYED the same way).
 SEEN: dict[int, int] = {}
 PLAYED: dict[int, int] = {}
+
+# every position the real game has reached, oldest first, trimmed to the reversible window (only
+# positions since the last pawn move or capture can ever recur). get_move appends the position
+# it was last handed and loads this into STATE.game_hashes before each search, so the search's
+# repetition checks count the whole game, not just the current tree. _LAST_KEY is the previous
+# get_move's position hash, 0 when there is nothing to carry (first move, or a non-search reply).
+GAME_HASHES: list[int] = []
+_LAST_KEY: int = 0
+MASK64 = (1 << 64) - 1
 
 
 STATE_SPEC = [
@@ -242,9 +224,12 @@ STATE_SPEC = [
     ("tt_score", nb.int64[:]),
     ("tt_depth", nb.int64[:]),        # -1 = empty slot
     ("tt_flag", nb.int64[:]),
+    ("tt_eval", nb.int64[:]),         # cached NNUE static eval for this slot's position, or NO_EVAL
     ("history", nb.int64[:, :, :]),   # [side][bitboard piece id][to-square] cutoff tally
     ("killers", nb.int64[:, :]),      # [depth][0..1] quiet move that cut there, or NO_MOVE
     ("path", nb.uint64[:]),           # node hash per ply, for repetition detection
+    ("game_hashes", nb.uint64[:]),    # positions from the real game before this search (the
+    ("game_n", nb.int64),             # reversible window), so repetition checks see the whole game
     ("nodes", nb.int64),
     ("root_best", nb.int64),
     ("aborted", nb.int64),
@@ -267,9 +252,12 @@ class SearchState:
         self.tt_score = np.zeros(size, dtype=np.int64)
         self.tt_depth = np.full(size, -1, dtype=np.int64)
         self.tt_flag = np.zeros(size, dtype=np.int64)
+        self.tt_eval = np.full(size, NO_EVAL, dtype=np.int64)
         self.history = np.zeros((2, 7, 64), dtype=np.int64)
         self.killers = np.full((MAX_DEPTH + 1, 2), NO_MOVE, dtype=np.int64)
         self.path = np.zeros(MAX_DEPTH * 2 + 8, dtype=np.uint64)
+        self.game_hashes = np.zeros(128, dtype=np.uint64)
+        self.game_n = 0
         self.nodes = 0
         self.root_best = NO_MOVE
         self.aborted = 0
@@ -280,156 +268,12 @@ class SearchState:
 STATE = SearchState()
 
 
-# chess.popcount, jitted: nopython mode has no int.bit_count(). The SWAR form sums set bits in
-# parallel - pairwise, then nibble-wise, then a multiply that gathers every byte's subtotal into
-# the top one - in a fixed handful of ops, where the clear-lowest-bit loop it replaced cost one
-# iteration per set bit.
-# ref: https://www.chessprogramming.org/Population_Count#SWAR-Popcount
-@njit(cache=True)
-def popcount(bb: int) -> int:
-    two = np.uint64(0x3333_3333_3333_3333)
-    x = np.uint64(bb)
-    x -= (x >> np.uint64(1)) & np.uint64(0x5555_5555_5555_5555)
-    x = (x & two) + ((x >> np.uint64(2)) & two)
-    x = (x + (x >> np.uint64(4))) & np.uint64(0x0F0F_0F0F_0F0F_0F0F)
-    return (x * np.uint64(0x0101_0101_0101_0101)) >> np.uint64(56)
-
-
-# How many of `colour`'s pawns stand on `square`'s file, strictly ahead of it toward the far
-# rank - a doubled-pawn count for a pawn, a free structural signal for anything else. Same
-# shift-and-mask as reference.pawns_ahead.
-# ref: https://www.chessprogramming.org/Doubled_Pawn
-@njit(cache=True)
-def pawns_ahead(square: int, colour: int, own_pawns: int) -> int:
-    if colour == WHITE:
-        ahead = (np.uint64(0x0101_0101_0101_0100) << np.uint8(square)) & FULL_BB
-    else:
-        ahead = np.uint64(0x0080_8080_8080_8080) >> np.uint8(63 - square)
-    return popcount(ahead & own_pawns)
-
-
-# Squares a queen on `square` would reach through `occupied` - used from the king's square as a
-# king-exposure proxy (reference.slider_scope, bitboard-native here).
-# ref: https://www.chessprogramming.org/King_Safety
-@njit(cache=True)
-def slider_scope(square: int, occupied: int) -> int:
-    return popcount(queen_attacks(np.uint8(square), occupied))
-
-
-# King-move distance between two squares (chess.square_distance): the larger of the file and
-# rank gaps - how many moves a king needs to get from one to the other.
-@njit(cache=True)
-def chebyshev(a: int, b: int) -> int:
-    file_gap = (a & 7) - (b & 7)
-    rank_gap = (a >> 3) - (b >> 3)
-    if file_gap < 0:
-        file_gap = -file_gap
-    if rank_gap < 0:
-        rank_gap = -rank_gap
-    return file_gap if file_gap > rank_gap else rank_gap
-
-
-# Static score in centipawns from the side to move's point of view - reference.evaluate off
-# bitboards, jitted end to end. Each colour's terms are summed from white's side and negated at
-# the end for black; every weight is Texel-tuned, from tables.py.
+# Static score in centipawns from the side to move's point of view - the NNUE forward pass over
+# the Board's accumulator. make_move / parse_fen keep board.acc in step, so this is just the
+# dequantise-and-run-the-float-tail in nnue/accumulator.py; no board scan here.
 @njit(cache=True)
 def evaluate(board: Board) -> int:
-    side_to_move = board.side
-    occupied = board.occupancy[2]
-    midgame = 0
-    endgame = 0
-    phase = 0
-
-    white_king_square = lsb_index(board.pieces[WHITE, KING])
-    black_king_square = lsb_index(board.pieces[1, KING])
-
-    for colour in range(2):
-        sign = 1 if colour == WHITE else -1
-        own_pawns = board.pieces[colour, 0]
-        enemy_pawns = board.pieces[1 - colour, 0]
-
-        king_square = white_king_square if colour == WHITE else black_king_square
-        enemy_king_square = black_king_square if colour == WHITE else white_king_square
-        king_file = king_square & 7
-
-        for piece_type in range(6):
-            bb = board.pieces[colour, piece_type]
-            while bb:
-                square = lsb_index(bb)
-                bb &= bb - np.uint64(1)
-
-                # far pawn: on the opposite half of the board from its own king's file, so it
-                # scores on FAR_PAWN's row instead of PAWN's.
-                far = piece_type == 0 and ((square & 7) ^ king_file) & 4
-                virtual_type = FAR_PAWN if far else piece_type + 1
-
-                i = square if colour == WHITE else square ^ 56
-
-                # material (one flat number per virtual type) plus placement, looked up per
-                # square. two separate tables, not folded together, so each can be tuned alone.
-                # ref: https://www.chessprogramming.org/Piece-Square_Tables
-                mg = MATERIAL_MG[virtual_type] + MIDGAME_PST[virtual_type, i]
-                eg = MATERIAL_EG[virtual_type] + ENDGAME_PST[virtual_type, i]
-
-                # slider mobility: more reachable squares is better.
-                # ref: https://www.chessprogramming.org/Mobility
-                if piece_type == BISHOP:
-                    reach = popcount(bishop_attacks(np.uint8(square), occupied))
-                    mg += MOBILITY_MG[virtual_type] * reach
-                    eg += MOBILITY_EG[virtual_type] * reach
-                elif piece_type == ROOK:
-                    reach = popcount(rook_attacks(np.uint8(square), occupied))
-                    mg += MOBILITY_MG[virtual_type] * reach
-                    eg += MOBILITY_EG[virtual_type] * reach
-                elif piece_type == QUEEN:
-                    reach = popcount(queen_attacks(np.uint8(square), occupied))
-                    mg += MOBILITY_MG[virtual_type] * reach
-                    eg += MOBILITY_EG[virtual_type] * reach
-                # king safety as a phantom queen: open lines from the king square read as danger.
-                # ref: https://www.chessprogramming.org/King_Safety
-                elif piece_type == KING:
-                    scope = slider_scope(square, occupied)
-                    mg += KING_EXPOSURE_MG * scope
-                    eg += KING_EXPOSURE_EG * scope
-
-                # friendly pawns on this file ahead of this piece - a doubled-pawn penalty for a
-                # pawn, a free per-type term for anything else.
-                # ref: https://www.chessprogramming.org/Doubled_Pawn
-                stacked = pawns_ahead(square, colour, own_pawns)
-                mg += PAWN_AHEAD_MG[virtual_type] * stacked
-                eg += PAWN_AHEAD_EG[virtual_type] * stacked
-
-                # passed pawn: no enemy pawn ahead on its file or an adjacent one. bonus by how
-                # far it has advanced; once it is past the middle, also score how near each king
-                # stands to the square in front of it - the endgame's central race.
-                # ref: https://www.chessprogramming.org/Passed_Pawn
-                if piece_type == 0 and enemy_pawns & PASSED_MASK[colour, square] == 0:
-                    rank = np.int64(square >> 3)
-                    relative_rank = rank if colour == WHITE else 7 - rank
-                    mg += PASSED_PAWN_MG[relative_rank]
-                    eg += PASSED_PAWN_EG[relative_rank]
-
-                    if relative_rank >= 4:
-                        stop = np.int64(square) + 8 if colour == WHITE else np.int64(square) - 8
-                        eg += KING_PASSER_OWN_EG * chebyshev(king_square, stop)
-                        eg += KING_PASSER_ENEMY_EG * chebyshev(enemy_king_square, stop)
-
-                midgame += sign * mg
-                endgame += sign * eg
-                phase += PHASE_WEIGHT[piece_type]
-
-    if phase > 24:
-        phase = 24
-
-    # a small bonus for having the move.  ref: https://www.chessprogramming.org/Tempo
-    tempo = 1 if side_to_move == WHITE else -1
-    midgame += TEMPO_MG * tempo
-    endgame += TEMPO_EG * tempo
-
-    # tapered blend: all midgame with every piece on, all endgame with none. floor division to
-    # match reference.evaluate.  ref: https://www.chessprogramming.org/Tapered_Eval
-    score = (midgame * phase + endgame * (24 - phase)) // 24
-    return score if side_to_move == WHITE else -score
+    return evaluate_accumulator(board.acc, board.side, popcount(board.occupancy[2]))
 
 
 # Piece type (0..5) on `square`, either colour, or -1 if empty - python-chess's board.piece_at
@@ -720,6 +564,20 @@ def repetitions(path: np.ndarray, upto: int, node_hash: int) -> int:
     return n
 
 
+# Occurrences of `node_hash` among the positions the real game reached before this search
+# (get_move seeds state.game_hashes with the reversible window). Added to `repetitions` at every
+# repetition check so a line that returns to a position the game has already visited is scored
+# as the draw the referee would claim - the search cannot see the game history any other way.
+@njit(cache=True)
+def game_reps(state: SearchState, node_hash: int) -> int:
+    n = 0
+    for i in range(state.game_n):
+        if state.game_hashes[i] == node_hash:
+            n += 1
+
+    return n
+
+
 # A draw scored from the side-to-move's view at `ply`: negative when it is our move (an even ply
 # from the root), positive when it is the opponent's. A repetition or stalemate then only wins
 # the search when every real try is worse than conceding CONTEMPT, so a level game is played on
@@ -743,6 +601,43 @@ def order_key(is_tt: int, mvv: int, is_killer: int, hist: int) -> int:
 # jitted twin of reference.negamax; each pruning step carries its own reference there and here.
 # ref: https://www.chessprogramming.org/Negamax
 # ref: https://www.chessprogramming.org/Alpha-Beta
+# Exact Syzygy score for a position with <= TB_MEN men, or NO_TB when the tables cannot answer
+# (too many men, or the child table is absent). A win/loss is ply-adjusted so the search still
+# prefers the faster one. objmode drops to nnue.tablebase.tb_score with the raw piece bitboards.
+@njit  # not cache=True: objmode
+def tb_probe_score(board: Board, ply: int) -> int:
+    if popcount(board.occupancy[2]) > TB_MEN:
+        return NO_TB
+
+    # material key (counts of P,N,B,R,Q per side, 3 bits each; colour-canonicalised) - skip the
+    # objmode probe entirely when we have no table for this ending.
+    white_key = np.int64(0)
+    black_key = np.int64(0)
+    for piece_type in range(5):  # pawn..queen, king excluded
+        white_key |= np.int64(popcount(board.pieces[0, piece_type])) << np.int64(3 * piece_type)
+        black_key |= np.int64(popcount(board.pieces[1, piece_type])) << np.int64(3 * piece_type)
+    key = white_key | (black_key << np.int64(15))
+    swapped = black_key | (white_key << np.int64(15))
+    if swapped < key:
+        key = swapped
+    lo = np.searchsorted(TB_COVERED, key)
+    if lo >= TB_COVERED.size or TB_COVERED[lo] != key:
+        return NO_TB
+
+    pieces = board.pieces
+    side = board.side
+    outcome = 0
+    with objmode(outcome="int64"):
+        outcome = tb_score(pieces, side)
+    if outcome == TB_NONE:
+        return NO_TB
+    if outcome > 0:
+        return TB_WIN_SCORE - ply
+    if outcome < 0:
+        return -TB_WIN_SCORE + ply
+    return 0  # exact draw; caller applies contempt
+
+
 @njit  # not cache=True: recursive + objmode
 def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int, ply: int) -> int:
     state.nodes += 1
@@ -759,10 +654,10 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     key = board.zobrist
     state.path[ply] = key
 
-    # threefold repetition inside the search is a draw. checking for the third occurrence (not
-    # the second) keeps this off a position the game has only reached once for real.
+    # threefold repetition is a draw - counting the search path plus what the real game already
+    # reached (game_reps), so a position the game has seen twice needs only one more here.
     # ref: https://www.chessprogramming.org/Repetitions
-    if repetitions(state.path, ply + 1, key) >= 3:
+    if repetitions(state.path, ply + 1, key) + game_reps(state, key) >= 3:
         return contempt_draw(ply)
 
     # mate-distance pruning: clamp the window to the mate band still reachable from here.
@@ -777,6 +672,27 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
         return alpha
 
     in_check = is_check(board, board.side)
+
+    # fifty-move rule: the referee claims it, so a hundred halfmoves with no capture and no pawn
+    # move is a draw however won the position looks - and a tablebase probe answers as if the
+    # clock were zeroed, so this has to come first. Checkmate outranks the clock (a mate on the
+    # hundredth halfmove is a win), which is why the rare branch pays for a move generation.
+    # ref: https://www.chessprogramming.org/Fifty-move_Rule
+    if board.halfmove_clock >= 100:
+        _fifty_moves, fifty_count = legal_moves(board)
+
+        if in_check and fifty_count == 0:
+            return -MATE_SCORE + ply
+
+        return contempt_draw(ply)
+
+    # tablebase: an exact WDL for a <= TB_MEN position - ground truth in place of the net's
+    # saturated "winning-ish" number, so the search actually converts won endings and steers
+    # clear of tablebase draws. before the TT probe so a stale blind entry can't shadow it.
+    if popcount(board.occupancy[2]) <= TB_MEN:
+        tb = tb_probe_score(board, ply)
+        if tb != NO_TB:
+            return contempt_draw(ply) if tb == 0 else tb
 
     # recursion floor: a checking sequence extends every ply, so `depth` never falls - this
     # stops it running away. resolve no-legal-moves first so a mate isn't misjudged by the eval.
@@ -825,8 +741,15 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     # static eval, shared by reverse futility and null-move here and late-move / futility
     # pruning in the move loop. computed whenever not in check - the eval misjudges a position
     # in check - regardless of depth, since null-move pruning needs it past the shallow cutoff.
+    # reuse the TT's cached eval on a key match: evaluate is pure in (acc, side), so it is the
+    # exact value evaluate(board) would return, minus the NNUE forward.
     shallow = depth <= LMP_MAX_DEPTH and not in_check
-    static_eval = evaluate(board) if not in_check else 0
+    if in_check:
+        static_eval = 0
+    elif EVAL_CACHE and tt_hit and state.tt_eval[slot] != NO_EVAL:
+        static_eval = state.tt_eval[slot]
+    else:
+        static_eval = evaluate(board)
 
     # reverse futility pruning: so far ahead that conceding RFP_MARGIN per remaining ply still
     # clears beta, so assume the real search fails high too.
@@ -922,9 +845,13 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
         new_depth = depth - 1 + extension  # the check extension, if any, folds in here
 
         # first repetition scores as a draw and the line is not searched on - a move before the
-        # threefold rule, so the search can still steer into or away from the draw.
+        # threefold rule, so the search can still steer into or away from the draw. counts the
+        # real game too: while winning we then never bring a position up for a second time.
         # ref: https://www.chessprogramming.org/Repetitions
-        if child.halfmove_clock >= 4 and repetitions(state.path, ply + 1, child.zobrist) >= 1:
+        if child.halfmove_clock >= 4 and (
+            repetitions(state.path, ply + 1, child.zobrist)
+            + game_reps(state, child.zobrist) >= 1
+        ):
             score = contempt_draw(ply)
         elif r == 0:
             # the move the ordering trusts most - full-window principal variation search.
@@ -998,6 +925,7 @@ def negamax(state: SearchState, board: Board, depth: int, alpha: int, beta: int,
     state.tt_score[slot] = score_to_tt(best, ply)
     state.tt_depth[slot] = depth
     state.tt_flag[slot] = flag
+    state.tt_eval[slot] = NO_EVAL if in_check else static_eval  # cache the NNUE eval for revisits
 
     return best
 
@@ -1022,12 +950,31 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
 
     key = board.zobrist
     state.path[ply] = key
-    # threefold repetition is a draw - same guard as negamax. a check sequence that runs into
-    # the qsearch tail can still cycle; without this it just keeps searching it.
-    if repetitions(state.path, ply + 1, key) >= 3:
+    # threefold repetition is a draw - same guard as negamax, real game included.
+    if repetitions(state.path, ply + 1, key) + game_reps(state, key) >= 3:
         return contempt_draw(ply)
 
     in_check = is_check(board, board.side)
+
+    # fifty-move rule: the referee claims it, so a hundred halfmoves with no capture and no pawn
+    # move is a draw however won the position looks - and a tablebase probe answers as if the
+    # clock were zeroed, so this has to come first. Checkmate outranks the clock (a mate on the
+    # hundredth halfmove is a win), which is why the rare branch pays for a move generation.
+    # ref: https://www.chessprogramming.org/Fifty-move_Rule
+    if board.halfmove_clock >= 100:
+        _fifty_moves, fifty_count = legal_moves(board)
+
+        if in_check and fifty_count == 0:
+            return -MATE_SCORE + ply
+
+        return contempt_draw(ply)
+
+    # tablebase: exact WDL for a <= TB_MEN position, same as negamax - qsearch is where a capture
+    # sequence collapses into a bare-piece ending, so it is the node that most needs the truth.
+    if popcount(board.occupancy[2]) <= TB_MEN:
+        tb = tb_probe_score(board, ply)
+        if tb != NO_TB:
+            return contempt_draw(ply) if tb == 0 else tb
 
     # recursion floor, matching negamax's - the only thing that bounds a checking sequence here.
     if ply >= MAX_DEPTH:
@@ -1035,7 +982,7 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
 
         if in_check and count == 0:
             return -MATE_SCORE + ply
-        
+
         return evaluate(board)
 
     # transposition-table probe: shared with negamax, so a capture sequence reached by two move
@@ -1043,8 +990,10 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
     # ref: https://www.chessprogramming.org/Transposition_Table
     slot = key & TT_MASK
     tt_move = NO_MOVE
+    tt_eval_cached = NO_EVAL
     if state.tt_depth[slot] >= 0 and state.tt_key[slot] == key:
         tt_move = state.tt_move[slot]
+        tt_eval_cached = state.tt_eval[slot]
         tt_score = score_from_tt(state.tt_score[slot], ply)
         flag = state.tt_flag[slot]
 
@@ -1066,8 +1015,12 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
         n = count
         standing_pat = -MATE_SCORE
     else:
-        # the side to move can decline to capture, so the static evaluation is a floor
-        standing_pat = evaluate(board)
+        # the side to move can decline to capture, so the static evaluation is a floor. a TT
+        # key match carries the exact eval (evaluate is pure in acc/side) - reuse it.
+        if EVAL_CACHE and tt_eval_cached != NO_EVAL:
+            standing_pat = tt_eval_cached
+        else:
+            standing_pat = evaluate(board)
 
         if standing_pat >= beta:
             return standing_pat
@@ -1137,6 +1090,7 @@ def quiescence_search(state: SearchState, board: Board, alpha: int, beta: int, p
     state.tt_score[slot] = score_to_tt(alpha, ply)
     state.tt_depth[slot] = 0
     state.tt_flag[slot] = flag
+    state.tt_eval[slot] = NO_EVAL if in_check else standing_pat  # cache the NNUE eval for revisits
 
     return alpha
 
@@ -1172,9 +1126,12 @@ def search_root(
         move = moves[ranked[r]]
         child = make_move(board, move)
         
-        if child.halfmove_clock >= 4 and repetitions(state.path, 1, child.zobrist) >= 1:
-            # this move brings a position up for the second time - a draw (see negamax). the
-            # root is our move, so contempt_draw(0) docks it: don't repeat unless all else is worse
+        if child.halfmove_clock >= 4 and (
+            repetitions(state.path, 1, child.zobrist) + game_reps(state, child.zobrist) >= 1
+        ):
+            # this move brings a position up for the second time (search path or real game) - a
+            # draw (see negamax). the root is our move, so contempt_draw(0) docks it: don't
+            # repeat unless all else is worse.
             score = contempt_draw(0)
         elif r == 0:
             # first move: full window; children search from ply 1 so a mate there is mate-in-1
@@ -1275,6 +1232,16 @@ def panic_move(board: Board) -> int:
     return best
 
 
+# Copy the tail of GAME_HASHES into STATE.game_hashes so the jitted repetition checks can read
+# it. The window is already small (bounded by the fifty-move clock); the cap is a safety net.
+def load_game_hashes() -> None:
+    cap = STATE.game_hashes.shape[0]
+    n = min(len(GAME_HASHES), cap)
+    for i in range(n):
+        STATE.game_hashes[i] = np.uint64(GAME_HASHES[len(GAME_HASHES) - n + i] & MASK64)
+    STATE.game_n = n
+
+
 def get_move(fen: str, time_left_ms: int) -> str:
     board = parse_fen(fen)
     moves, count = legal_moves(board)
@@ -1290,11 +1257,38 @@ def get_move(fen: str, time_left_ms: int) -> str:
     SEEN[key] = seen + 1
     STATE.avoid = PLAYED.get(key, NO_MOVE) if seen else NO_MOVE
 
+    # fold the position we were handed last move into the game trail, trim it to the reversible
+    # window (halfmove_clock plies precede this one with no pawn move or capture, so nothing
+    # older can recur), and load it for the search. game_reps() then counts real-game
+    # occurrences alongside the search path.
+    global _LAST_KEY
+    if _LAST_KEY:
+        GAME_HASHES.append(_LAST_KEY)
+    window = int(board.halfmove_clock)
+    if len(GAME_HASHES) > window:
+        del GAME_HASHES[: len(GAME_HASHES) - window]
+    load_game_hashes()
+    _LAST_KEY = 0  # set again only on a real-move return; a non-search reply carries nothing
+
+    # Syzygy: with few enough men the tablebase gives the exact best move, so the endgame is
+    # played perfectly instead of trusting a net that never learned to convert (KRvK evals at
+    # +57 cp). Optimal and deterministic - no anti-repetition bookkeeping needed - but keep the
+    # game trail continuous in case a later position falls back to the search. A probe failure
+    # must never cost the game: fall through.
+    try:
+        tb_uci = best_tb_move(fen)
+    except Exception:  # any tablebase trouble just means "search instead"
+        tb_uci = None
+    if tb_uci is not None:
+        _LAST_KEY = key
+        return tb_uci
+
     # critically low on time: don't search at all - even one depth-1 iteration could overrun
     # what this move has left. grab the best-looking move and return.
     if time_left_ms < PANIC_TIME_MS:
         best = panic_move(board)
         PLAYED[key] = best
+        _LAST_KEY = key
         return move_uci(best)
 
     try:
@@ -1303,20 +1297,26 @@ def get_move(fen: str, time_left_ms: int) -> str:
         start = time.monotonic()
         # hard deadline to abort at - the 50 ms is slack for the node batch past the last clock
         # check plus move-gen and the reply; soft cap past which no new depth starts
-        deadline = start + time_left_ms / HARD_LIMIT / 1000 - 0.05
-        soft_cap = time_left_ms / SOFT_LIMIT / 1000
+        endgame = popcount(board.occupancy[2]) <= ENDGAME_TIME_MEN
+        hard_limit = HARD_LIMIT_ENDGAME if endgame else HARD_LIMIT
+        soft_limit = SOFT_LIMIT_ENDGAME if endgame else SOFT_LIMIT
+        deadline = start + time_left_ms / hard_limit / 1000 - 0.05
+        soft_cap = time_left_ms / soft_limit / 1000
         best, _score = deepen(board, start, deadline, soft_cap, int(moves[0]))
         PLAYED[key] = int(best)
+        _LAST_KEY = key
 
         # nothing bounds the table's size mid-game the way a real fixed array would - clear it
         # if it has filled enough slots to be a memory concern.
         if tt_used() > TT_MAX_ENTRIES:
             STATE.tt_depth[:] = -1
+            STATE.tt_eval[:] = NO_EVAL
 
         return move_uci(int(best))
     
     except Exception as exc:  # numba failed to compile, or a bug in the port - hand off
         print(f"agent: numba search unavailable ({exc!r}); using the reference engine")
+        GAME_HASHES.clear()  # the reference engine's replies are not folded in; drop the trail
         return reference.get_move(fen, time_left_ms)
 
 
@@ -1331,7 +1331,9 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     STATE.aborted = 0
     STATE.deadline = time.monotonic() + 3600.0
     STATE.avoid = NO_MOVE
+    STATE.game_n = 0
     STATE.tt_depth[:] = -1
+    STATE.tt_eval[:] = NO_EVAL
     STATE.history[:] = 0
     STATE.killers[:] = NO_MOVE
 
@@ -1350,6 +1352,7 @@ def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
 def warm_up() -> None:
     board = parse_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
     board.zobrist = np.uint64(zobrist_hash(board))
+    evaluate(board)  # compile the NNUE forward before the search leans on it
     search_root(STATE, board, 4, -MATE_SCORE, MATE_SCORE, NO_MOVE)
     # a position with captures on the board so see / attackers_to compile here, not on the clock
     capt = parse_fen("r1bqkbnr/ppp2ppp/2n5/1B1pp3/3PP3/5N2/PPP2PPP/RNBQK2R w KQkq - 0 4")
@@ -1358,6 +1361,8 @@ def warm_up() -> None:
         see(capt, int(moves[j]))
         see_ge(capt, int(moves[j]), 0)
         move_ordering_score(capt, int(moves[j]))
+    # compile the in-search tablebase probe (objmode -> chess.syzygy) off the clock
+    tb_probe_score(parse_fen("8/8/8/4k3/8/3RK3/8/8 w - - 0 1"), 0)
 
 
 warm_up()
