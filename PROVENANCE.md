@@ -1,40 +1,50 @@
 # Provenance
 
-An AI Chessathon entry. This repo holds my work plus the competition's unmodified starter
-kit; this file records which is which.
+An AI Chessathon entry, restructured after the competition ended into a portfolio repo. This
+file records what's mine and what's the competition's unmodified starter kit.
 
 ## My work
 
 | Path | What it is |
 |---|---|
-| `agent.py` | The engine. `get_move`'s signature is the platform contract; everything below it is mine, built in the numbered phases in `docs/plan.md`. |
-| `docs/plan.md` | The build roadmap and the measurement discipline behind each change. |
-| `tools/bench.py` | Openings-based A/B match runner (score, Elo, 95% band). |
-| `tools/nodebench.py` | Fixed-depth node-count bench for verifying search refactors are exact. |
-| `tools/tune.py` | Offline Texel tuner: fits the evaluation weights to game results and writes `tables.py`. |
-| `README.md` | Rewritten (the starter shipped its own). |
+| `engine/` | The engine that played the competition (2314 Elo, `docs/games.csv`). `agent.py`'s `get_move` signature is the platform contract; everything else here is mine. |
+| `stages/01` through `stages/07` | Frozen extracts of the classical engine's own commit history — see each stage's `README.md` for the exact commit. |
+| `stages/08-nnue` | A single-net build of `engine/`, not vendored history. |
+| `docs/plan.md`, `docs/nnue-plan.md` | The build roadmap and the measurement behind every change, classical then NNUE. |
+| `docs/writeup.md` | The retrospective. |
+| `docs/games.csv`, `docs/games/*.pgn` | The competition's actual rated-game record, downloaded from the platform. |
+| `bench/` | Every measurement tool: `openings_bench.py` (Elo A/B), `nodebench.py` (exact-refactor check), `endgame_bench.py`, `eg_suite.py`, `perft.py`, and every `verify_*.py` twin check. |
+| `tools/` | The offline pipeline: `train_nn.py`, `export_nn.py`, `ingest_lichess.py`, `label.py`, `label_eg.py`, `filter_shards.py`, `tune.py`, `gen_magics.py`, `bundle_engine.py`, `model.py`. |
+| `README.md` | Rewritten (the starter shipped its own; see below). |
+
+`engine/net.npz` and `engine/net_eg.npz` are nets I trained (`tools/train_nn.py` /
+`tools/export_nn.py`) on Lichess and Stockfish-labelled positions — training on
+engine-annotated data is explicitly allowed; what's banned is shipping someone else's engine
+or net, and neither net is either.
 
 ## Vendored: the AI Chessathon starter
 
 By Advit Arora, used under the MIT License (see `LICENSE`). Source:
 <https://github.com/advitrocks9/aichessathon-starter>
 
-- `harness/` — local runner, referee, clock, packaging, and match drivers that mirror the
-  platform protocol. **Unmodified.** `AGENTS.md` forbids editing it: changing it makes local
-  results meaningless.
-- `baselines/` — `random`, `greedy`, `minimax`, `numba`; opponents to measure against.
-- `Makefile`, `pyproject.toml`, `uv.lock` — build targets and the pinned dependency set.
-- `AGENTS.md` (and its `CLAUDE.md` alias) — the competition contract and repo rules.
-- `.github/workflows/ci.yml`, `LICENSE`, `.gitignore` — CI, licence, and ignores
-  (`.gitignore` has one added line for a local scratch directory).
+- `harness/` — local runner, referee, clock, and match drivers that mirror the platform
+  protocol. **Unmodified.** The competition rules forbade editing it: changing it makes local
+  results meaningless, and that's still true for reproducing the numbers in `docs/`.
+- `LICENSE`, `.gitignore` (most of it) — licence and ignores.
+
+`baselines/` (the starter's `random` / `greedy` / `minimax` / `numba` opponents) and the
+starter's own `Makefile` / `pyproject.toml` are gone — superseded by `stages/`, which tells the
+same "something to measure against" story as the engine's own history instead of a fixed set
+of throwaway opponents.
 
 ## Verifying the split
 
-`git log -- harness/ baselines/ Makefile pyproject.toml` shows only the initial commit — the
-starter has not been touched since. `git log -- agent.py` is the full phase history of the
-engine.
+`git log -- harness/` shows only the initial commit — the one vendored piece has not been
+touched since. `git log -- engine/agent.py stages/` (and, before this restructure, `agent.py`
+and `nnue/`) is the full phase history of the engine, classical through NNUE.
 
 ## What ships
 
-`make zip` builds the submission from `agent.py` alone (plus model weights, once there are
-any). Nothing under `harness/`, `baselines/`, or `tools/` goes in it.
+`make zip` (`tools/bundle_engine.py --zip`) builds the submission from a flattened `engine/`:
+`agent.py` at the zip root plus the shared bitboard-layer modules, both nets, and the Syzygy
+tables. Nothing under `harness/`, `bench/`, `tools/`, or `stages/` goes in it.
