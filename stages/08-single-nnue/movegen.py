@@ -4,7 +4,7 @@ for python-chess's own: `legal_moves` ~ `chess.Board.legal_moves`, `make_move` ~
 
 The `*_reference` functions (is_attacked_reference, is_check_reference, make_move_reference,
 legal_moves_reference, pseudo_legal_moves_reference) are plain-Python originals kept only so
-tools/perft.py and tools/verify_movegen.py can check the jitted versions against them move for
+bench/perft.py and bench/verify_movegen.py can check the jitted versions against them move for
 move; nothing on the hot path calls them.
 
 legal_moves_reference checks legality the simple, slow way: generate every pseudo-legal move
@@ -378,7 +378,7 @@ def legal_moves_reference(board: Board) -> list[int]:
 # (castling rights use a small if/elif chain on the square instead of ROOK_HOME_TO_CASTLE_FLAG),
 # no scan_forward generator (lsb_index plus an explicit "clear the lowest bit and loop"
 # instead), no any()-over-a-generator (an explicit loop with an early exit). The plain versions
-# above stay as the reference tools/verify_movegen.py checks these against - move for move, not
+# above stay as the reference bench/verify_movegen.py checks these against - move for move, not
 # just perft's leaf counts, since two different bugs could cancel out into the same node count.
 
 
@@ -396,11 +396,11 @@ def is_attacked(board: Board, square: int, by_colour: int) -> bool:
         return True
 
     bishops_queens = board.pieces[by_colour, BISHOP] | board.pieces[by_colour, QUEEN]
-    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:  # type: ignore[arg-type]
+    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:
         return True
 
     rooks_queens = board.pieces[by_colour, ROOK] | board.pieces[by_colour, QUEEN]
-    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)  # type: ignore[arg-type]
+    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)
 
 
 # is_check_reference, jitted - the hot-path check test the search calls every node.
@@ -527,9 +527,9 @@ def pseudo_legal_moves(board: Board) -> tuple[np.ndarray, int]:
                 )
                 count += 1
 
-        if ep_square != NO_SQUARE and PAWN_ATTACKS_NB[colour, from_square] & bit(ep_square):  # type: ignore[arg-type]
+        if ep_square != NO_SQUARE and PAWN_ATTACKS_NB[colour, from_square] & bit(ep_square):
             moves[count] = encode_move_nb(
-                from_square, ep_square, PAWN, PROMOTION_NONE, True, True, False, False  # type: ignore[arg-type]
+                from_square, ep_square, PAWN, PROMOTION_NONE, True, True, False, False
             )
             count += 1
 
@@ -612,7 +612,7 @@ def pseudo_legal_moves(board: Board) -> tuple[np.ndarray, int]:
                 from_square, to_square, KING, PROMOTION_NONE, is_capture, False, False, False
             )
             count += 1
-        count = castling_moves_nb(board, colour, from_square, occupied, moves, count)  # type: ignore[arg-type]
+        count = castling_moves_nb(board, colour, from_square, occupied, moves, count)
 
     return moves, count
 
@@ -641,7 +641,7 @@ def make_move(board: Board, move: int) -> Board:
         rook_from, rook_to = from_square - 4, from_square - 1
 
     # incremental zobrist: start from the parent's hash and XOR in every change below. it must
-    # track zobrist.zobrist_hash exactly - tools/verify_zobrist.py checks that after every
+    # track zobrist.zobrist_hash exactly - bench/verify_zobrist.py checks that after every
     # move. side flips every move; the old en-passant file, if any, comes back out.
     key = board.zobrist ^ SIDE_KEY
     if board.ep_square != NO_SQUARE:
@@ -649,7 +649,7 @@ def make_move(board: Board, move: int) -> Board:
 
     # every piece bitboard edit below is mirrored into new.acc by an update_feature call, so the
     # child accumulator is the parent's (copy_board carried it over) plus a handful of column
-    # deltas instead of a full transformer pass. tools/verify_nnue.py checks this stays equal to
+    # deltas instead of a full transformer pass. bench/verify_nnue.py checks this stays equal to
     # a from-scratch fill after every move. The net is the one the child's men count picks: a
     # capture that takes the board down to EG_MEN men crosses into the endgame net, whose
     # accumulator has nothing in common with the parent's, so that child is filled from scratch
@@ -757,11 +757,11 @@ def attacked_by_with_occ(board: Board, square: int, by_colour: int, occupied: in
         return True
     
     bishops_queens = board.pieces[by_colour, BISHOP] | board.pieces[by_colour, QUEEN]
-    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:  # type: ignore[arg-type]
+    if bishop_attacks(nb.uint8(square), occupied) & bishops_queens:
         return True
     
     rooks_queens = board.pieces[by_colour, ROOK] | board.pieces[by_colour, QUEEN]
-    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)  # type: ignore[arg-type]
+    return bool(rook_attacks(nb.uint8(square), occupied) & rooks_queens)
 
 
 # Legal moves, decided without playing them: compute once per position which enemy pieces check
@@ -787,8 +787,8 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
     # every enemy piece giving check right now
     checkers = KNIGHT_ATTACKS_NB[king_square] & board.pieces[them, KNIGHT]
     checkers |= PAWN_ATTACKS_NB[us, king_square] & board.pieces[them, PAWN]
-    checkers |= bishop_attacks(nb.uint8(king_square), occupied) & bishops_queens  # type: ignore[arg-type]
-    checkers |= rook_attacks(nb.uint8(king_square), occupied) & rooks_queens  # type: ignore[arg-type]
+    checkers |= bishop_attacks(nb.uint8(king_square), occupied) & bishops_queens
+    checkers |= rook_attacks(nb.uint8(king_square), occupied) & rooks_queens
 
     # squares a non-king move is allowed to land on: anywhere if not in check, the checker or a
     # blocking square if singly checked, nowhere (king must move) if doubly checked
@@ -804,8 +804,8 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
 
     # a piece is pinned when an enemy slider's path to the king is blocked by it alone
     pinned = nb.uint64(0)
-    snipers = rook_attacks(nb.uint8(king_square), enemy_occ) & rooks_queens  # type: ignore[arg-type]
-    snipers |= bishop_attacks(nb.uint8(king_square), enemy_occ) & bishops_queens  # type: ignore[arg-type]
+    snipers = rook_attacks(nb.uint8(king_square), enemy_occ) & rooks_queens
+    snipers |= bishop_attacks(nb.uint8(king_square), enemy_occ) & bishops_queens
     while snipers:
 
         sniper_square = lsb_index(snipers)
@@ -835,7 +835,7 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
             if move_is_capture(move):
                 test_occupied &= clear_mask(to_square)
 
-            if not attacked_by_with_occ(board, to_square, them, test_occupied):  # type: ignore[arg-type]
+            if not attacked_by_with_occ(board, to_square, them, test_occupied):
                 pseudo[legal_count] = move
                 legal_count += 1
 
@@ -845,7 +845,7 @@ def legal_moves(board: Board) -> tuple[np.ndarray, int]:
             continue
 
         if move_is_en_passant(move):
-            if not is_check(make_move(board, move), us):  # type: ignore[arg-type, type-var, call-arg]
+            if not is_check(make_move(board, move), us):  # type: ignore[type-var, call-arg]
                 pseudo[legal_count] = move
                 legal_count += 1
 

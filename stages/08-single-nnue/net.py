@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -31,7 +32,7 @@ PERM = np.asarray(black_perspective_perm(), dtype=np.int64)
 
 # The shipped net, unless NNUE_NET names another file: engine.accumulator loads its weights at
 # import, so a candidate net can only be scored by pointing this at it before importing the
-# engine (tools/eg_suite.py --net does exactly that). Unset on the platform, where the only
+# engine (bench/eg_suite.py --net does exactly that). Unset on the platform, where the only
 # net is the one in the zip. Pair it with NUMBA_CACHE_DIR - the jitted eval freezes these
 # weights into its on-disk cache.
 DEFAULT_PATH = Path(os.environ.get("NNUE_NET") or Path(__file__).resolve().parent / "net.npz")
@@ -88,7 +89,7 @@ def accumulators(packed: np.ndarray, stm: np.ndarray, weights: Weights) -> np.nd
 
 
 def clipped_relu(x: np.ndarray) -> np.ndarray:
-    return np.clip(x, 0.0, 1.0)
+    return cast(np.ndarray, np.clip(x, 0.0, 1.0))
 
 
 # output bucket per row from packed bitboards: total set bits is the piece count (the 12
@@ -101,7 +102,7 @@ def output_buckets_of(packed: np.ndarray) -> np.ndarray:
 # centipawns, side-to-move relative, from integer accumulators [N, 2, ft_out] and the per-row
 # output bucket [N]. The same computation the numba evaluate_accumulator() runs: dequantise the
 # accumulator, clipped ReLU, then the float tail, taking each row's selected head.
-# tools/verify_nnue.py holds the engine to this.
+# bench/verify_nnue.py holds the engine to this.
 def forward_from_accumulators(
     acc: np.ndarray, weights: Weights, out_bucket: np.ndarray
 ) -> np.ndarray:
@@ -111,7 +112,7 @@ def forward_from_accumulators(
     x = clipped_relu(x @ weights.l2_weight.T + weights.l2_bias)
     heads = x @ weights.out_weight.T + weights.out_bias  # [N, output_buckets]
     raw = heads[np.arange(heads.shape[0]), out_bucket]
-    return raw * weights.cp_scale
+    return cast(np.ndarray, raw * weights.cp_scale)
 
 
 # convenience: centipawns straight from packed bitboards + stm.

@@ -4,7 +4,7 @@ precomputed once per square at import. Sliding-piece attacks do, and they are th
 call-heavy thing in the engine, so they go through magic bitboards: one multiply-shift-index
 into a table built at import (see the Magic bitboards section below), not a ray walk. The
 classical outward-stepping walk is kept as ray_attacks_reference - build_attack_tables()
-checks every table entry against it at import, and tools/verify_attacks.py re-checks the
+checks every table entry against it at import, and bench/verify_attacks.py re-checks the
 compiled lookup, so the fast path can never silently disagree with the slow one.
 
 This is the bitboard layer's stand-in for python-chess's attack tables (`chess.BB_DIAG_ATTACKS`
@@ -144,7 +144,7 @@ for square in range(64):
 # The two magic arrays below were found offline by tools/gen_magics.py (a deterministic xorshift
 # search - re-run it to reproduce them exactly). Searching is slow in Python and would eat the
 # platform's init budget, so the constants are checked in; build_attack_tables() still verifies
-# every one square by square against ray_attacks_reference at import, and tools/verify_attacks.py
+# every one square by square against ray_attacks_reference at import, and bench/verify_attacks.py
 # re-checks the compiled lookup, so a wrong constant cannot reach the search.
 # ref: https://www.chessprogramming.org/Magic_Bitboards
 MASK64 = (1 << 64) - 1

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import chess
 import chess.syzygy
+import numpy as np
 
 TB_MEN = 4  # the shipped set covers every 3-4-man ending, WDL and DTZ both
 TB_NONE = -999  # tb_score sentinel: position not covered / probe failed
@@ -70,7 +71,7 @@ CORNERS = (chess.A1, chess.A8, chess.H1, chess.H8)  # the mate drivers in rank_m
 # (uint64 [2, 6], colour then pawn..king) with `side` to move (0 = white). No castling / ep -
 # irrelevant to a Syzygy probe. Built the low-level way python-chess uses internally so there is
 # no FEN round-trip on the hot path.
-def _board_from_pieces(pieces: object, side: int) -> chess.Board:
+def _board_from_pieces(pieces: np.ndarray, side: int) -> chess.Board:
     board = chess.Board.empty()
     board.pawns = int(pieces[0][0]) | int(pieces[1][0])
     board.knights = int(pieces[0][1]) | int(pieces[1][1])
@@ -96,7 +97,7 @@ def _board_from_pieces(pieces: object, side: int) -> chess.Board:
 # board but cannot be reached inside the fifty-move rule, so the referee claims the draw first
 # and it is a draw in play. Only +-2 is a result. The numba search calls this through objmode at
 # every <= TB_MEN node; `pieces` / `side` are the jitclass fields.
-def tb_score(pieces: object, side: int) -> int:
+def tb_score(pieces: np.ndarray, side: int) -> int:
     if _TB is None:
         return TB_NONE
     try:

@@ -4,7 +4,7 @@ for python-chess's own: `legal_moves` ~ `chess.Board.legal_moves`, `make_move` ~
 
 The `*_reference` functions (is_attacked_reference, is_check_reference, make_move_reference,
 legal_moves_reference, pseudo_legal_moves_reference) are plain-Python originals kept only so
-tools/perft.py and tools/verify_movegen.py can check the jitted versions against them move for
+bench/perft.py and bench/verify_movegen.py can check the jitted versions against them move for
 move; nothing on the hot path calls them.
 
 legal_moves_reference checks legality the simple, slow way: generate every pseudo-legal move
@@ -378,7 +378,7 @@ def legal_moves_reference(board: Board) -> list[int]:
 # (castling rights use a small if/elif chain on the square instead of ROOK_HOME_TO_CASTLE_FLAG),
 # no scan_forward generator (lsb_index plus an explicit "clear the lowest bit and loop"
 # instead), no any()-over-a-generator (an explicit loop with an early exit). The plain versions
-# above stay as the reference tools/verify_movegen.py checks these against - move for move, not
+# above stay as the reference bench/verify_movegen.py checks these against - move for move, not
 # just perft's leaf counts, since two different bugs could cancel out into the same node count.
 
 
@@ -641,7 +641,7 @@ def make_move(board: Board, move: int) -> Board:
         rook_from, rook_to = from_square - 4, from_square - 1
 
     # incremental zobrist: start from the parent's hash and XOR in every change below. it must
-    # track zobrist.zobrist_hash exactly - tools/verify_zobrist.py checks that after every
+    # track zobrist.zobrist_hash exactly - bench/verify_zobrist.py checks that after every
     # move. side flips every move; the old en-passant file, if any, comes back out.
     key = board.zobrist ^ SIDE_KEY
     if board.ep_square != NO_SQUARE:
@@ -649,7 +649,7 @@ def make_move(board: Board, move: int) -> Board:
 
     # every piece bitboard edit below is mirrored into new.acc by an update_feature call, so the
     # child accumulator is the parent's (copy_board carried it over) plus a handful of column
-    # deltas instead of a full transformer pass. tools/verify_nnue.py checks this stays equal to
+    # deltas instead of a full transformer pass. bench/verify_nnue.py checks this stays equal to
     # a from-scratch fill after every move. The net is the one the child's men count picks: a
     # capture that takes the board down to EG_MEN men crosses into the endgame net, whose
     # accumulator has nothing in common with the parent's, so that child is filled from scratch

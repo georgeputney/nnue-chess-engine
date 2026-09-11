@@ -216,7 +216,7 @@ NO_EVAL = 1 << 30
 # kill switch for the TT static-eval cache. On (1) the search reuses a TT key match's stored
 # NNUE eval instead of recomputing; evaluate is pure in (acc, side) so this is exact - move,
 # score and node count are identical to the recompute path, only wall time drops. Kept as a
-# constant so tools/nodebench.py can prove the equivalence by flipping it.
+# constant so bench/nodebench.py can prove the equivalence by flipping it.
 EVAL_CACHE = 1
 
 # The static evaluation is the NNUE forward pass over the Board's accumulator - see
@@ -404,7 +404,7 @@ def see(board: Board, move: int) -> int:
 # Is the static exchange evaluation of `move` at least `threshold`? Same swap as see(), carried
 # as one running balance the Stockfish way so there is no gain[] array to allocate - see() is
 # called once per capture in quiescence, the hottest loop in the engine. The two agree exactly:
-# see_ge(m, t) == (see(m) >= t), which tools/verify_see.py checks. reference.see_ge.
+# see_ge(m, t) == (see(m) >= t), which bench/verify_see.py checks. reference.see_ge.
 # ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
 @njit(cache=True)
 def see_ge(board: Board, move: int, threshold: int) -> bool:
@@ -1346,7 +1346,7 @@ def tt_used() -> int:
     return int(np.count_nonzero(STATE.tt_depth >= 0))
 
 
-# tools/nodebench.py / tools/verify_search.py hook: fixed-depth search from a clean table,
+# bench/nodebench.py / bench/verify_search.py hook: fixed-depth search from a clean table,
 # returning (uci, score, nodes). The same shape as reference.bench_search.
 def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     STATE.nodes = 0

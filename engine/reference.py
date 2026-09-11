@@ -1,8 +1,8 @@
 """
 Reference implementation: the pure-python-chess engine agent.py was ported to numba from.
 
-Not the platform entry point - that is agent.py. Kept as the golden reference tools/verify_eval.py
-and tools/ab.py check against, and as the fallback agent.get_move uses if the numba layer fails
+Not the platform entry point - that is agent.py. Kept as the golden reference bench/verify_eval.py
+and bench/ab.py check against, and as the fallback agent.get_move uses if the numba layer fails
 to compile on the platform. An alpha-beta search over a Texel-tuned tapered evaluation.
 """
 
@@ -106,7 +106,7 @@ MAX_HISTORY = 1 << 14          # quiet-move history score saturates toward +/- t
 TT_MAX_ENTRIES = 1_500_000     # get_move clears the table past this many entries
 
 # module state the search mutates; get_move / bench_search reset what needs it per move.
-NODES = 0                      # nodes visited this search; read by tools/nodebench.py
+NODES = 0                      # nodes visited this search; read by bench/nodebench.py
 DEADLINE: float | None = None  # wall-clock time to abort at, or None when off the clock
 
 # keyed by board._transposition_key() directly, not a hashed-and-masked int: that key is a
@@ -278,7 +278,7 @@ def see(board: chess.Board, move: chess.Move) -> int:
 # Is the static exchange evaluation of `move` at least `threshold`? The same swap as see(),
 # carried as one running balance so there is no gain[] list to build - the jitted agent.see_ge
 # is the one that matters, this is its mirror. see_ge(m, t) == (see(m) >= t) by construction;
-# tools/verify_see.py checks it. agent.see_ge.
+# bench/verify_see.py checks it. agent.see_ge.
 # ref: https://www.chessprogramming.org/Static_Exchange_Evaluation
 def see_ge(board: chess.Board, move: chess.Move, threshold: int) -> bool:
     to = move.to_square
@@ -1083,8 +1083,8 @@ def get_move(fen: str, time_left_ms: int) -> str:
     return best.uci()
 
 
-# fixed-depth search returning (move, score, nodes) - the shape tools/verify_search.py diffs the
-# numba port against, and the same hook tools/nodebench.py expects.
+# fixed-depth search returning (move, score, nodes) - the shape bench/verify_search.py diffs the
+# numba port against, and the same hook bench/nodebench.py expects.
 def bench_search(fen: str, depth: int) -> tuple[str, int, int]:
     global NODES
     NODES = 0

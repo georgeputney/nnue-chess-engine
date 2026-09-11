@@ -42,10 +42,10 @@ HALF = 384                          # one perspective-colour block: 6 piece type
 # rated games (docs/nnue-plan.md) put every endgame loss in the 8-12 men band, where the shared
 # net scores drawn and won positions alike. A second net cannot touch the middlegame, so the A/B
 # isolates the band. With no engine/net_eg.npz beside this module the endgame net is the main net
-# and the engine is bit-identical to a single-net build (tools/nodebench.py proves that).
+# and the engine is bit-identical to a single-net build (bench/nodebench.py proves that).
 # numba freezes these arrays into its on-disk cache (cache=True) and does not notice when the
 # file behind them changes: after swapping either net, delete the .nbi/.nbc files in
-# engine/__pycache__ (a fresh bundle dir has none) or tools/verify_nnue.py fails its oracle check.
+# engine/__pycache__ (a fresh bundle dir has none) or bench/verify_nnue.py fails its oracle check.
 EG_MEN = 12
 EG_WEIGHTS = load(EG_PATH) if EG_PATH.exists() else WEIGHTS
 EG_FT_WEIGHT_T = EG_WEIGHTS.ft_weight_t
