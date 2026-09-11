@@ -5,7 +5,7 @@ and a self-trained NNUE evaluation - built for [AI Chessathon](https://aichessat
 head-to-head engine competition run under a strict sandbox: one CPU core, 2 GB, no network, no
 GPU, 120 s + 0.5 s per move. **Final result: 2314 Elo, #48 of 465 entries (top 10%)** - up from
 a 1498 starting rating over 122 rated games (49W 23D 42L, 53.1% score); see
-[`docs/games.csv`](docs/games.csv) for the full record and [`docs/games/`](docs/games) for the
+[`games/results.csv`](games/results.csv) for the full record and [`games/`](games) for the
 individual PGNs.
 
 No third-party engine or network went into this. Every heuristic and every tuned weight traces
@@ -65,7 +65,8 @@ stages/     the development arc: 01-material-1ply ... 07-numba-classical, 08-sin
 bench/      how every claim here was measured, and how to reproduce it
 tools/      the offline training pipeline (data, Texel tuning, NNUE training/export)
 harness/    the competition's local runner/referee/clock, vendored, unmodified
-docs/       the build log, the retrospective, and the real game record
+docs/       the build log and the retrospective
+games/      the real competition record: results.csv and every game's PGN
 ```
 
 ## Running it

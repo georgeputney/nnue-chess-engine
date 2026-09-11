@@ -4,7 +4,7 @@ __pycache__/
 .ruff_cache/
 submission*.zip
 *.pgn
-!docs/games/*.pgn
+!games/*.pgn
 candidates/
 snapshots/
 .DS_Store

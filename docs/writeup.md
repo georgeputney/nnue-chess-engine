@@ -109,9 +109,9 @@ net with much better static error lost 84 Elo. Every eval change here was judged
 
 ## The competition
 
-`docs/games.csv` is the full 122-round record - a starting rating of 1498, decisive games
+`games/results.csv` is the full 122-round record - a starting rating of 1498, decisive games
 through checkmate more often than any other termination, and a final rank of **#48 of 465
-entries (top 10%)** at **2314 Elo**. `docs/games/` has the individual game PGNs.
+entries (top 10%)** at **2314 Elo**. `games/` has the individual game PGNs alongside it.
 
 ## Lessons
 

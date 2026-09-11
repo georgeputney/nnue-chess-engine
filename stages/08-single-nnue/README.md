@@ -24,8 +24,9 @@ stage is what NNUE alone bought before that fix.
 **Measured.** Beat a comparable classical-eval fork 100% and lost 0-6 to a stronger NNUE fork
 at 8 s + 0.1 s early in development (see stage 07's README) - the gap that motivated this
 stage. The full, endgame-net-equipped build (`engine/`) is what played the competition:
-**2314 Elo**, 49W-42L-23D-8void over 122 rated games ([docs/games.csv](../../docs/games.csv),
-individual game PGNs in [docs/games/](../../docs/games)).
+**2314 Elo**, 49W-42L-23D-8void over 122 rated games
+([games/results.csv](../../games/results.csv), individual game PGNs in
+[games/](../../games)).
 
 **Run it:**
 
