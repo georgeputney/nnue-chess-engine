@@ -31,7 +31,8 @@ import numpy as np
 from numba import njit
 from numba.experimental import jitclass  # type: ignore[attr-defined]
 
-from bitboard import (
+from engine.accumulator import ACC_WIDTH, fill_accumulator
+from engine.bitboard import (
     BLACK,
     BLACK_KINGSIDE,
     BLACK_QUEENSIDE,
@@ -44,7 +45,6 @@ from bitboard import (
     square,
     square_name,
 )
-from nnue.accumulator import ACC_WIDTH, fill_accumulator
 
 # fen character <-> piece-type id, and fen castling character -> rights flag
 PIECE_INDEX = {letter: index for index, letter in enumerate(PIECE_LETTERS)}
@@ -62,7 +62,7 @@ BOARD_SPEC = [
     ("fullmove_number", nb.int32),
     ("zobrist", nb.uint64),          # incremental hash; make_move keeps it in step
     ("acc", nb.int32[:, :]),         # NNUE accumulator [colour][ACC_WIDTH]; make_move keeps it
-]                                    # in step, parse_fen fills it (nnue/accumulator.py)
+]                                    # in step, parse_fen fills it (engine/accumulator.py)
 
 
 @jitclass(BOARD_SPEC)  # type: ignore[no-untyped-call]  # mypy can't see through this

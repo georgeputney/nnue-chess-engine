@@ -14,7 +14,7 @@ net.npz layout (all little-endian):
     cp_scale      float32 scalar          centipawns = round(raw_output * cp_scale)
 
 The final layer is one head per output bucket; a forward selects the head the position's piece
-count picks (nnue.arch.output_bucket).
+count picks (engine.arch.output_bucket).
 """
 
 from __future__ import annotations
@@ -24,19 +24,19 @@ from pathlib import Path
 
 import numpy as np
 
-from nnue.arch import BLACK, FEATURES, WHITE, black_perspective_perm, output_bucket
+from engine.arch import BLACK, FEATURES, WHITE, black_perspective_perm, output_bucket
 
 # built once: black_plane[:, i] == white_plane[:, PERM[i]]
 PERM = np.asarray(black_perspective_perm(), dtype=np.int64)
 
-# The shipped net, unless NNUE_NET names another file: nnue.accumulator loads its weights at
+# The shipped net, unless NNUE_NET names another file: engine.accumulator loads its weights at
 # import, so a candidate net can only be scored by pointing this at it before importing the
 # engine (tools/eg_suite.py --net does exactly that). Unset on the platform, where the only
 # net is the one in the zip. Pair it with NUMBA_CACHE_DIR - the jitted eval freezes these
 # weights into its on-disk cache.
 DEFAULT_PATH = Path(os.environ.get("NNUE_NET") or Path(__file__).resolve().parent / "net.npz")
 
-# The endgame net for positions with <= nnue.accumulator.EG_MEN men (NNUE_NET_EG overrides it
+# The endgame net for positions with <= engine.accumulator.EG_MEN men (NNUE_NET_EG overrides it
 # the same way). Optional: when the file is absent the main net serves every position.
 EG_PATH = Path(os.environ.get("NNUE_NET_EG") or Path(__file__).resolve().parent / "net_eg.npz")
 
@@ -92,7 +92,7 @@ def clipped_relu(x: np.ndarray) -> np.ndarray:
 
 
 # output bucket per row from packed bitboards: total set bits is the piece count (the 12
-# bitboards partition the occupied squares), then nnue.arch.output_bucket.
+# bitboards partition the occupied squares), then engine.arch.output_bucket.
 def output_buckets_of(packed: np.ndarray) -> np.ndarray:
     counts = np.unpackbits(packed, axis=1).sum(axis=1)
     return np.array([output_bucket(int(c)) for c in counts], dtype=np.int64)

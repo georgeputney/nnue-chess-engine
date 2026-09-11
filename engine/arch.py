@@ -1,6 +1,6 @@
 """Shared, dependency-free description of the NNUE architecture.
 
-Both the trainer (nnue/model.py, torch) and the runtime (nnue/net.py, numpy, and the numba
+Both the trainer (engine/model.py, torch) and the runtime (engine/net.py, numpy, and the numba
 agent that loads it) import their shape from here so the three can never drift apart. Nothing
 in this module imports torch or numba - it is plain constants and one pure-Python index helper.
 
@@ -41,7 +41,7 @@ BLACK = 1
 
 
 # flat feature index for a piece of `piece_colour` (0/1) of `piece_type` on `square`, seen from
-# `perspective` (0 = white to move's own view, 1 = black's). Mirrors nnue/net.py's vectorised
+# `perspective` (0 = white to move's own view, 1 = black's). Mirrors engine/net.py's vectorised
 # permutation and the numba refresh loop; all three must agree.
 def feature_index(perspective: int, piece_colour: int, piece_type: int, square: int) -> int:
     relative_colour = 0 if piece_colour == perspective else 1

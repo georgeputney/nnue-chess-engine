@@ -21,7 +21,8 @@ import numba as nb
 import numpy as np
 from numba import njit
 
-from attacks import (
+from engine.accumulator import EG_MEN, fill_accumulator, men_of, update_feature
+from engine.attacks import (
     KING_ATTACKS,
     KING_ATTACKS_NB,
     KNIGHT_ATTACKS,
@@ -32,7 +33,7 @@ from attacks import (
     queen_attacks,
     rook_attacks,
 )
-from bitboard import (
+from engine.bitboard import (
     BISHOP,
     BLACK,
     BLACK_KINGSIDE,
@@ -53,7 +54,8 @@ from bitboard import (
     scan_forward,
     square_rank,
 )
-from move import (
+from engine.board import Board, copy_board, parse_fen, recompute_occupancy
+from engine.move import (
     PROMOTION_NONE,
     encode_move,
     encode_move_nb,
@@ -67,9 +69,7 @@ from move import (
     move_promotion_raw,
     move_to_square,
 )
-from nnue.accumulator import EG_MEN, fill_accumulator, men_of, update_feature
-from nnue.board import Board, copy_board, parse_fen, recompute_occupancy
-from zobrist import CASTLING_KEYS, EP_FILE_KEYS, PIECE_SQUARE_KEYS, SIDE_KEY
+from engine.zobrist import CASTLING_KEYS, EP_FILE_KEYS, PIECE_SQUARE_KEYS, SIDE_KEY
 
 MAX_MOVES = 256  # a real legal chess position never has more than 218 (a published upper
 # bound); pseudo-legal generation can't exceed that by much since it's the same piece-attack

@@ -1,15 +1,15 @@
 """The NNUE evaluation, @njit end to end - the drop-in replacement for the linear evaluate().
 
-The feature transformer's int16 weights and int32 bias are loaded from nnue/net.npz at import;
+The feature transformer's int16 weights and int32 bias are loaded from engine/net.npz at import;
 the tail (2*ft_out -> 32 -> 32 -> 1) is float32 (int8 was tried and bought nothing in numba:
 the float MAC loop already vectorises, and on this hardware there is no wider int8 path). An
 accumulator is one int32 vector per colour: FT_BIAS plus the transformer column of every piece
 feature that colour's perspective sees. fill_accumulator builds one from scratch; update_feature
-adds or removes a single piece's columns, which is what nnue/movegen.make_move calls so a
+adds or removes a single piece's columns, which is what engine/movegen.make_move calls so a
 child's accumulator costs a handful of column updates rather than a full rebuild.
 
 Everything here takes plain numpy arrays (an accumulator, a piece-bitboard table), never a
-Board, so it has no import cycle with nnue/board.py and numba can cache it. See nnue/arch.py
+Board, so it has no import cycle with engine/board.py and numba can cache it. See engine/arch.py
 for the feature layout the index maths below implements.
 """
 
@@ -18,8 +18,8 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
-from bitboard import lsb_index
-from nnue.net import EG_PATH, load
+from engine.bitboard import lsb_index
+from engine.net import EG_PATH, load
 
 WEIGHTS = load()
 FT_WEIGHT_T = WEIGHTS.ft_weight_t   # int16 [768, ft_out], transposed: one feature is a row
@@ -41,11 +41,11 @@ HALF = 384                          # one perspective-colour block: 6 piece type
 # (tools/filter_shards.py), used for every position with that few men. The post-mortem of the
 # rated games (docs/nnue-plan.md) put every endgame loss in the 8-12 men band, where the shared
 # net scores drawn and won positions alike. A second net cannot touch the middlegame, so the A/B
-# isolates the band. With no nnue/net_eg.npz beside this module the endgame net is the main net
+# isolates the band. With no engine/net_eg.npz beside this module the endgame net is the main net
 # and the engine is bit-identical to a single-net build (tools/nodebench.py proves that).
 # numba freezes these arrays into its on-disk cache (cache=True) and does not notice when the
 # file behind them changes: after swapping either net, delete the .nbi/.nbc files in
-# nnue/__pycache__ (a fresh bundle dir has none) or tools/verify_nnue.py fails its oracle check.
+# engine/__pycache__ (a fresh bundle dir has none) or tools/verify_nnue.py fails its oracle check.
 EG_MEN = 12
 EG_WEIGHTS = load(EG_PATH) if EG_PATH.exists() else WEIGHTS
 EG_FT_WEIGHT_T = EG_WEIGHTS.ft_weight_t
@@ -59,7 +59,7 @@ EG_OUT_WEIGHT = EG_WEIGHTS.out_weight
 EG_OUT_BIAS = EG_WEIGHTS.out_bias
 EG_CP_SCALE = float(EG_WEIGHTS.cp_scale)
 if EG_FT_BIAS.shape[0] != ACC_WIDTH or EG_OUT_BIAS.shape[0] != OUT_BUCKETS:
-    raise ValueError("nnue/net_eg.npz must have the same width and output buckets as net.npz")
+    raise ValueError("engine/net_eg.npz must have the same width and output buckets as net.npz")
 
 
 # Set-bit count, SWAR - bitboard.popcount is plain-Python (bb.bit_count()), so the jitted eval
@@ -88,7 +88,7 @@ def men_of(pieces: np.ndarray) -> int:
 
 # Flat transformer-input index for a piece of `piece_colour` (0 white, 1 black) of `piece_type`
 # (0..5) on `square` (a1 = 0), seen from `perspective` (0 white-to-move's own view, 1 black's).
-# Mirrors nnue.arch.feature_index and nnue.net's vectorised permutation.
+# Mirrors engine.arch.feature_index and engine.net's vectorised permutation.
 @njit(cache=True)
 def feature_index(perspective: int, piece_colour: int, piece_type: int, square: int) -> int:
     relative_colour = 0 if piece_colour == perspective else 1
@@ -182,7 +182,7 @@ def evaluate_accumulator(acc: np.ndarray, side: int, piece_count: int) -> int:
     own = side
     other = 1 - side
 
-    bucket = (piece_count - 2) // 4  # nnue.arch.output_bucket, rederived
+    bucket = (piece_count - 2) // 4  # engine.arch.output_bucket, rederived
     if bucket < 0:
         bucket = 0
     elif bucket >= OUT_BUCKETS:

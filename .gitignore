@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 submission*.zip
 *.pgn
+!docs/games/*.pgn
 candidates/
 snapshots/
 .DS_Store
@@ -13,12 +14,12 @@ data/
 tools/tune_cache*.npz
 tools/tuned_tables.py
 
-# NNUE: torch training checkpoints are regenerable from data/; only nnue/net.npz ships
-nnue/*.pt
+# NNUE: torch training checkpoints are regenerable from data/; only the shipped nets ship
+engine/*.pt
 # candidate nets from the A/B runs; only net.npz and net_eg.npz are the ones that ship
-nnue/net_*.npz
-!nnue/net_eg.npz
-# the 5-man Syzygy slice, measured on 2026-09-09 and rejected (see nnue/tablebase.py)
-nnue/syzygy5/
-# eg_suite's Stockfish-labelled position cache, rebuildable with eg_suite.py --build
-tools/suites/
+engine/net_*.npz
+!engine/net_eg.npz
+# the 5-man Syzygy slice, measured on 2026-09-09 and rejected (see engine/tablebase.py)
+engine/syzygy5/
+# eg_suite's Stockfish-labelled position cache, rebuildable with bench/eg_suite.py --build
+bench/suites/

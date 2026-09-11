@@ -17,7 +17,7 @@ import numba as nb
 import numpy as np
 from numba import njit
 
-from bitboard import (
+from engine.bitboard import (
     BLACK,
     FULL_BB,
     NOT_FILE_A,

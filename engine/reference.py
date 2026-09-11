@@ -15,7 +15,7 @@ import chess.polyglot
 # Texel-tuned evaluation weights (tools/tune.py). Material and placement are two separate
 # tables, added together at lookup time; the piece-square tables are a1-first; every term is
 # split midgame / endgame.
-from tables import (
+from engine.tables import (
     ENDGAME_PST,
     KING_EXPOSURE_EG,
     KING_EXPOSURE_MG,

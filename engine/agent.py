@@ -46,7 +46,7 @@ Features (each carries a chessprogramming.org reference at its use site):
     - a cross-call penalty on replaying the move chosen last time in this exact position, since
       each get_move rebuilds the board with no history and cannot otherwise see a real repeat
 
-  Evaluation (NNUE - nnue/accumulator.py, weights nnue/net.npz from tools/train_nn.py)
+  Evaluation (NNUE - engine/accumulator.py, weights engine/net.npz from tools/train_nn.py)
     - dual-perspective piece-placement net: 768 -> 256 feature transformer per colour, then a
       512 -> 32 -> 32 -> 1 tail over [own-to-move, other] with clipped-ReLU activations
     - the transformer output is an int32 accumulator carried on the Board; make_move keeps it
@@ -70,6 +70,17 @@ Features (each carries a chessprogramming.org reference at its use site):
     - import-time JIT warm-up so compilation lands in the platform's 90 s init budget
 """
 
+# ruff: noqa: E402  (the thread pin has to precede the numpy import)
+import os as _os
+
+# a referee running games in parallel puts many agents on the same cores; a BLAS that spawns a
+# thread per core in each one flags the clock. The search is single-threaded (numba @njit, no
+# parallel=) - nothing here wants a pool. Harmless on the platform's one core, insurance for a
+# local parallel harness and for BLAS calls chess.syzygy / numpy might make underneath.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_v, "1")
+
 import time
 
 import numba as nb
@@ -77,16 +88,29 @@ import numpy as np
 from numba import njit, objmode
 from numba.experimental import jitclass
 
-import reference
-from attacks import (
+from engine import reference
+from engine.accumulator import evaluate_accumulator, popcount
+from engine.attacks import (
     KING_ATTACKS_NB,
     KNIGHT_ATTACKS_NB,
     PAWN_ATTACKS_NB,
     bishop_attacks,
     rook_attacks,
 )
-from bitboard import BISHOP, BLACK, KING, KNIGHT, NO_SQUARE, PAWN, QUEEN, ROOK, WHITE, lsb_index
-from move import (
+from engine.bitboard import (
+    BISHOP,
+    BLACK,
+    KING,
+    KNIGHT,
+    NO_SQUARE,
+    PAWN,
+    QUEEN,
+    ROOK,
+    WHITE,
+    lsb_index,
+)
+from engine.board import Board, copy_board, parse_fen
+from engine.move import (
     PROMOTION_NONE,
     move_from_square,
     move_is_capture,
@@ -95,16 +119,14 @@ from move import (
     move_to_square,
     move_uci,
 )
-from move import (
+from engine.move import (
     move_promotion_raw as move_promotion,
 )
-from nnue.accumulator import evaluate_accumulator, popcount
-from nnue.board import Board, copy_board, parse_fen
-from nnue.movegen import is_check, legal_moves, make_move
-from nnue.tablebase import COVERED_MATERIAL, TB_MEN, TB_NONE, best_tb_move, tb_score
-from zobrist import EP_FILE_KEYS, SIDE_KEY, zobrist_hash
+from engine.movegen import is_check, legal_moves, make_move
+from engine.tablebase import COVERED_MATERIAL, TB_MEN, TB_NONE, best_tb_move, tb_score
+from engine.zobrist import EP_FILE_KEYS, SIDE_KEY, zobrist_hash
 
-# sorted material keys we have a Syzygy table for (nnue.tablebase._material_key layout), frozen
+# sorted material keys we have a Syzygy table for (engine.tablebase._material_key layout), frozen
 # into the jitted probe so an uncovered <= TB_MEN node skips the objmode call.
 TB_COVERED = np.array(COVERED_MATERIAL, dtype=np.int64)
 
@@ -198,7 +220,7 @@ NO_EVAL = 1 << 30
 EVAL_CACHE = 1
 
 # The static evaluation is the NNUE forward pass over the Board's accumulator - see
-# nnue/accumulator.py (evaluate below is a one-line wrapper). None of the linear eval's tuned
+# engine/accumulator.py (evaluate below is a one-line wrapper). None of the linear eval's tuned
 # tables, phase blend, or hand-built pawn masks survive the switch. The NNUE forward is heavier
 # than the old linear eval, so its result is cached in the TT (tt_eval) and reused whenever the
 # search revisits a position - evaluate is pure in (acc, side), so a cache hit is exact.
@@ -270,7 +292,7 @@ STATE = SearchState()
 
 # Static score in centipawns from the side to move's point of view - the NNUE forward pass over
 # the Board's accumulator. make_move / parse_fen keep board.acc in step, so this is just the
-# dequantise-and-run-the-float-tail in nnue/accumulator.py; no board scan here.
+# dequantise-and-run-the-float-tail in engine/accumulator.py; no board scan here.
 @njit(cache=True)
 def evaluate(board: Board) -> int:
     return evaluate_accumulator(board.acc, board.side, popcount(board.occupancy[2]))
@@ -603,7 +625,7 @@ def order_key(is_tt: int, mvv: int, is_killer: int, hist: int) -> int:
 # ref: https://www.chessprogramming.org/Alpha-Beta
 # Exact Syzygy score for a position with <= TB_MEN men, or NO_TB when the tables cannot answer
 # (too many men, or the child table is absent). A win/loss is ply-adjusted so the search still
-# prefers the faster one. objmode drops to nnue.tablebase.tb_score with the raw piece bitboards.
+# prefers the faster one. objmode drops to engine.tablebase.tb_score with the raw piece bitboards.
 @njit  # not cache=True: objmode
 def tb_probe_score(board: Board, ply: int) -> int:
     if popcount(board.occupancy[2]) > TB_MEN:

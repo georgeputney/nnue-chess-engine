@@ -6,12 +6,12 @@ convert. get_move calls best_tb_move before the search; negamax / quiescence_sea
 tb_score at every <= TB_MEN node so the whole search steers toward won conversions and away from
 tablebase draws with ground truth instead of the blind net's saturated "winning-ish" number.
 
-nnue/syzygy/ ships the full 3-4-man Syzygy set, WDL + DTZ, 4.3 MB of public-domain generated
+engine/syzygy/ ships the full 3-4-man Syzygy set, WDL + DTZ, 4.3 MB of public-domain generated
 data (identical whoever produces it; the rules allow endgame tablebases). No network, no search;
 the tables are mmap'd read-only at import.
 
 A curated 5-man WDL slice (KRPvKR, KRPvKP, KRRvKR, KPPvKP, KRPPvK - 28 MB, now parked in
-nnue/syzygy5/) was built and measured on 2026-09-09: 80 games at 5 s + 0.1 s against the same
+engine/syzygy5/) was built and measured on 2026-09-09: 80 games at 5 s + 0.1 s against the same
 engine at TB_MEN = 4 scored -48 Elo [-114, +15], corroborated by three other runs. It taxes
 every <= 5-man node with an objmode probe in exactly the phase it was meant to help, an exact 0
 for a known draw outweighs our +-30 contempt so the search liquidates into certain draws, and
@@ -62,7 +62,7 @@ def _covered_material_keys() -> list[int]:
     return sorted(keys)
 
 
-COVERED_MATERIAL = _covered_material_keys()  # sorted; nnue.agent freezes it into the jitted probe
+COVERED_MATERIAL = _covered_material_keys()  # sorted; engine.agent freezes it into the jitted probe
 CORNERS = (chess.A1, chess.A8, chess.H1, chess.H8)  # the mate drivers in rank_move
 
 

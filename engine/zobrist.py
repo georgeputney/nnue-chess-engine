@@ -14,8 +14,8 @@ ref: https://www.chessprogramming.org/Zobrist_Hashing
 import numpy as np
 from numba import njit
 
-from bitboard import NO_SQUARE, lsb_index
-from board import Board
+from engine.bitboard import NO_SQUARE, lsb_index
+from engine.board import Board
 
 RNG = np.random.default_rng(0xC0FFEE)  # fixed seed: the hash must be the same across runs of
 # the same process (and, since games are separate processes, that's all that's ever needed)

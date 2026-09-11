@@ -27,7 +27,7 @@ Optional type or keyword arguments crossing the jit boundary.
 
 from numba import njit
 
-from bitboard import square_name
+from engine.bitboard import square_name
 
 PROMOTION_NONE = 7  # fits in the 3 promotion bits (0-5 are real piece types) alongside them
 
