@@ -1,3 +1,8 @@
+> **Historical.** The build log for phases 1-18, written as they happened; `agent.py` here is
+> the classical engine now frozen at [`stages/06-full-pruning`](../stages/06-full-pruning) and
+> [`stages/07-numba-classical`](../stages/07-numba-classical). See `docs/nnue-plan.md` for what
+> came after, and `docs/writeup.md` for the narrative version of both.
+
 # Building our own agent.py
 
 Goal: a hand-rolled alpha-beta chess engine in `agent.py`. The feature list below came out of

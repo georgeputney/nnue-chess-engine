@@ -1,7 +1,7 @@
 """Label a set of endgame positions with Stockfish, in tools/label.py's .npz schema, to mix
 into NNUE training. The lichess-eval corpus the net trained on is almost all middlegame and
 its decisive scores are clamped, so the net rates K+R vs K at +57 cp - it never learned that a
-won endgame is won. tools/eg_suite.py measures the gap; this closes it.
+won endgame is won. bench/eg_suite.py measures the gap; this closes it.
 
 Unlike tools/label.py this keeps decisive positions (a mate is mapped to +/- mate_cp, not
 dropped) and does not require the Stockfish PV to be quiet in the check sense - a checking move
@@ -12,7 +12,7 @@ teach as "this endgame is won").
     uv run python tools/label_eg.py --positions 3_000_000 --workers 10 --out data/endgame.npz
 
 Then mix into training - either drop it in the shard dir as another shard, or oversample it to
-a target fraction (see tools/train_nn.py). Re-run tools/eg_suite.py after: the <= 9-piece band's
+a target fraction (see tools/train_nn.py). Re-run bench/eg_suite.py after: the <= 9-piece band's
 static error should fall from ~250 cp toward < 100 without regressing the 13-16 band.
 """
 
@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.eg_suite import make_position  # noqa: E402
+from bench.eg_suite import make_position  # noqa: E402
 from tools.label import K, features, find_engine  # noqa: E402
 
 # (white pieces, black pieces, weight). Weighted toward decisive material (where the net is

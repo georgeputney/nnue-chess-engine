@@ -1,11 +1,11 @@
-"""Quantise a trained nnue/model.pt into nnue/net.npz - the file the engine loads.
+"""Quantise a trained tools/model.pt into engine/net.npz - the file the engine loads.
 
 The feature transformer goes to int16 with a single shared scale, so the accumulator is int32
 and its incremental column updates in make_move are exact. The tail (512 -> 32 -> 32 -> 1)
 stays float32: it is ~17k MACs, off the hot path, and keeping it float removes any
 torch-vs-numba quant-matching risk.
 
-    uv run python tools/export_nn.py --model nnue/model.pt --out nnue/net.npz
+    uv run python tools/export_nn.py --model tools/model.pt --out engine/net.npz
 
 Prints the quantisation error against the float model on a sample of real positions; a few cp
 of RMSE is expected and harmless.
@@ -24,9 +24,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nnue import net as netmod  # noqa: E402
-from nnue.arch import CP_SCALE  # noqa: E402
-from nnue.model import NNUE  # noqa: E402
+from engine import net as netmod  # noqa: E402
+from engine.arch import CP_SCALE  # noqa: E402
+from tools.model import NNUE  # noqa: E402
 
 INT16_MAX = 32767
 
@@ -45,8 +45,8 @@ def quantise_transformer(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, default=ROOT / "nnue" / "model.pt")
-    parser.add_argument("--out", type=Path, default=ROOT / "nnue" / "net.npz")
+    parser.add_argument("--model", type=Path, default=ROOT / "tools" / "model.pt")
+    parser.add_argument("--out", type=Path, default=ROOT / "engine" / "net.npz")
     parser.add_argument("--npz", type=Path, default=ROOT / "data" / "lichess.npz",
                         help="positions to measure quantisation error on")
     parser.add_argument("--sample", type=int, default=50000)

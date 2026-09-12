@@ -2,9 +2,9 @@
 schema: packed bitboards, side-to-move flag, Stockfish cp, win-probability wdl).
 
 Stockfish is a labeller only - nothing it produced ships in the zip. The net trained here is
-ours; tools/export_nn.py quantises it into nnue/net.npz, which is what the engine runs.
+ours; tools/export_nn.py quantises it into engine/net.npz, which is what the engine runs.
 
-    uv run python tools/train_nn.py --npz data/lichess.npz --out nnue/model.pt
+    uv run python tools/train_nn.py --npz data/lichess.npz --out tools/model.pt
     uv run python tools/train_nn.py --npz data/lichess.npz --limit 400000 --epochs 3   # smoke
 
 Device defaults to MPS on Apple Silicon, else CPU. The exported net is identical either way;
@@ -26,9 +26,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nnue.arch import CP_SCALE, FEATURES, OUTPUT_BUCKETS  # noqa: E402
-from nnue.model import NNUE  # noqa: E402
-from nnue.net import PERM  # noqa: E402
+from engine.arch import CP_SCALE, FEATURES, OUTPUT_BUCKETS  # noqa: E402
+from engine.net import PERM  # noqa: E402
+from tools.model import NNUE  # noqa: E402
 
 
 # Load a labelled set from a single .npz or a directory of shard_*.npz (tools/ingest_lichess.py
@@ -237,7 +237,7 @@ def evaluate_split(model: NNUE, batches: Batches | ShardStream) -> tuple[float, 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npz", type=Path, default=ROOT / "data" / "lichess.npz")
-    parser.add_argument("--out", type=Path, default=ROOT / "nnue" / "model.pt")
+    parser.add_argument("--out", type=Path, default=ROOT / "tools" / "model.pt")
     parser.add_argument("--device", default="auto", help="auto | mps | cpu | cuda")
     parser.add_argument("--ft-out", type=int, default=256, help="accumulator width per colour")
     parser.add_argument("--epochs", type=int, default=40)

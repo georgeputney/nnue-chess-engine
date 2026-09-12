@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 # coefficients() introspects a python-chess board, so it mirrors reference.evaluate (the plain
-# engine) - which tools/verify_eval.py holds bit-identical to the jitted agent.evaluate, so a
+# engine) - which bench/verify_eval.py holds bit-identical to the jitted agent.evaluate, so a
 # fit against one is a fit against the other.
 reference = importlib.import_module("reference")
 tables = importlib.import_module("tables")
