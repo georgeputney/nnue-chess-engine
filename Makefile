@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup bundle play arena zip gate bench verify web space
+.PHONY: setup bundle play arena zip gate bench verify lichess-check lichess-config web space
 
 setup:
 	uv sync
@@ -38,6 +38,17 @@ verify:
 	uv run python bench/verify_zobrist.py
 	uv run python bench/verify_see.py
 	uv run python bench/verify_nnue.py
+
+# the UCI bridge in lichess/: the same handshake lichess-bot opens a game with, run by hand
+lichess-check:
+	printf 'uci\nisready\nucinewgame\nposition startpos moves e2e4 e7e5\ngo movetime 3000\nquit\n' | uv run python lichess/uci.py
+
+# lichess-bot runs from its own clone, so its config needs this repo's paths spelled out in
+# full - fill them in rather than typing them. candidates/ is gitignored.
+lichess-config:
+	@mkdir -p candidates
+	@sed 's|/path/to/neural-chess-engine|$(CURDIR)|g' lichess/config.yml > candidates/config.yml
+	@echo "wrote candidates/config.yml - pass it to lichess-bot.py with --config"
 
 # the browser demo: one warm engine process behind a small HTTP server. PORT=8080 to move it.
 web:

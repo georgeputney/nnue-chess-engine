@@ -37,9 +37,12 @@ ignore = ["N818"]
 
 [tool.mypy]
 strict = true
-files = ["engine/agent.py", "engine/reference.py", "harness", "web/server.py"]
+files = ["engine/agent.py", "engine/reference.py", "harness", "lichess/uci.py",
+         "lichess/uci_client.py", "lichess/warm.py", "web/server.py"]
 explicit_package_bases = true
-mypy_path = "."
+# lichess/ as well as the root: warm.py imports uci.py the way the interpreter will find it at
+# runtime, as a top-level module beside it, not as lichess.uci.
+mypy_path = ".:lichess"
 
 # bench/ and tools/ were never in scope either (same reasoning as the overrides below) - they're
 # measurement and training scripts, not the submission, and most predate this file existing.

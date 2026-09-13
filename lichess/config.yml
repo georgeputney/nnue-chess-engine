@@ -1,0 +1,118 @@
+# lichess-bot configuration for this engine. Run `make lichess-config`, which writes a copy
+# with the two absolute paths below filled in, and point lichess-bot at it:
+#
+#     python3 lichess-bot.py --config /path/to/neural-chess-engine/candidates/config.yml
+#
+# or just copy that file into your lichess-bot clone as config.yml, which is where it looks by
+# default. See README.md next to this file.
+#
+# Based on lichess-bot's config.yml.default, cut down to what this engine needs. Every key
+# lichess-bot defaults for itself is left out; what is here is either required or a deliberate
+# choice, and the choices are the commented ones.
+
+token: "lip_your_token_here"    # A lichess OAuth token with the bot:play scope. Better:
+                                   # leave this alone and export LICHESS_BOT_TOKEN, which
+                                   # overrides it, so the token never lands in a file.
+url: "https://lichess.org/"
+
+engine:
+  # Absolute paths, both of them - lichess-bot runs from its own clone, so nothing relative to
+  # this repo resolves. `make lichess-config` fills them in.
+  dir: "/path/to/neural-chess-engine/lichess"
+  name: "uci_client.py"
+  interpreter: "/path/to/neural-chess-engine/.venv/bin/python"
+
+  protocol: "uci"
+  ponder: false                    # Required. The search runs synchronously inside `go` and
+                                   # the bridge advertises no ponder support; with this on,
+                                   # lichess-bot would send `go ponder` and wait for a `stop`
+                                   # that can never be answered.
+  silence_stderr: false            # The engine's own diagnostics come out here (fd 1 is
+                                   # pointed at stderr before it loads) - worth watching.
+
+  uci_options:
+    Move Overhead: 300             # ms held back on top of the move_overhead below. The only
+                                   # option the bridge offers: the transposition table is a
+                                   # fixed 2^22 slots and the search is single-threaded, so
+                                   # there is no Hash or Threads to set. Adding an option the
+                                   # engine does not advertise makes python-chess refuse to
+                                   # start it.
+
+  draw_or_resign:
+    offer_draw_enabled: false      # Both off because they need a score, and get_move returns
+    resign_enabled: false          # a move and nothing else - see the note in uci.py. Turning
+                                   # them on is harmless but does nothing.
+
+  online_moves:                    # All off, deliberately: a cloud-analysis or chessdb move is
+    chessdb_book:                  # some other engine's move, and the whole point of this bot
+      enabled: false               # is that it plays its own.
+    lichess_cloud_analysis:
+      enabled: false
+    lichess_opening_explorer:
+      enabled: false
+    online_egtb:
+      enabled: false
+
+  lichess_bot_tbs:
+    syzygy:
+      enabled: false               # The engine probes its own 3-4 man Syzygy tables in
+                                   # engine/syzygy already. Point this at a larger set if you
+                                   # have one - it is read by lichess-bot, not by the engine.
+
+  polyglot:
+    enabled: false                 # No opening book. Rated Chessathon games started from
+                                   # curated mid-opening positions, so the engine never had
+                                   # one; a .bin here would be a straight gain on lichess.
+
+abort_time: 30
+move_overhead: 1000                # ms lichess-bot deducts from the clock before telling the
+                                   # engine what is left. Raise it if games flag on a slow link.
+
+challenge:
+  concurrency: 1                   # One game at a time. The search is single-threaded and
+                                   # sized for a core to itself; two games on one machine take
+                                   # turns rather than doubling throughput.
+  sort_by: "best"
+  preference: "none"
+  accept_bot: true
+  only_bot: false
+  min_base: 120                    # 2+1 and nothing else, near the control the engine was
+  max_base: 120                    # tuned for (the Chessathon ran 120 s + 0.5 s a move).
+  min_increment: 1
+  max_increment: 1
+  variants:
+    - standard                     # Standard only. The engine has no variant rules, and its
+                                   # castling encoding is not chess960's.
+  time_controls:
+    - bullet                       # 2+1 is bullet by lichess's reckoning: it classifies on
+                                   # base + 40 x increment, so 120 + 40 = 160 s, under the
+                                   # 180 s blitz threshold. Note the cost: lichess-bot starts
+                                   # a fresh engine per game and the numba search takes about
+                                   # seven seconds to compile, which comes out of a 120 s
+                                   # clock. Widen min_base/max_base to 180 if that bites.
+  modes:
+    - casual
+    - rated
+
+greeting:
+  hello: "Hi! I'm {me}, a from-scratch NNUE engine. Good luck!"
+  goodbye: "Good game!"
+
+pgn_directory: "game_records"      # A PGN of every game, the way games/ holds the competition
+                                   # record. Written inside the lichess-bot clone.
+
+# The bot goes looking for opponents rather than waiting to be challenged, and plays rated, so
+# the account builds a public rating and a game history worth linking to. It still accepts
+# incoming challenges while it does.
+matchmaking:
+  allow_matchmaking: true
+  challenge_mode: "rated"          # "random" would mix in casual games, which rate nothing.
+  challenge_timeout: 1             # Minutes idle before it goes looking. 1 is the minimum;
+                                   # the default 30 would leave it sitting still most of the day.
+  allow_during_games: false        # concurrency is 1, so there is no second game to start.
+  challenge_initial_time:          # the only control it offers, matching what it accepts
+    - 120
+  challenge_increment:
+    - 1
+  opponent_rating_difference: 300
+  challenge_filter: "coarse"       # Stop re-challenging bots that decline; there are plenty.
