@@ -37,7 +37,7 @@ ignore = ["N818"]
 
 [tool.mypy]
 strict = true
-files = ["engine/agent.py", "engine/reference.py", "harness"]
+files = ["engine/agent.py", "engine/reference.py", "harness", "web/server.py"]
 explicit_package_bases = true
 mypy_path = "."
 

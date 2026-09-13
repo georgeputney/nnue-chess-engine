@@ -12,6 +12,12 @@ snapshots/
 AGENTS.md
 CLAUDE.md
 
+# systemd units, Caddy config and the bootstrap script for the server that runs the lichess
+# bot and the web demo. Operations for one specific box on one specific cloud, useless to
+# anyone else with this repo, and dated the moment that provider changes. Kept in the working
+# tree so deploy/push.sh works; never committed. See deploy/README.md.
+deploy/
+
 # texel tuning: training corpus and the regenerable dataset cache
 data/
 tools/tune_cache*.npz

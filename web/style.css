@@ -1,0 +1,475 @@
+/*
+ * Talos play page. Structure, spacing and interaction states come from the design handoff in
+ * `Chess engine web app.zip`. Type and neutrals deliberately do NOT: the handoff specifies
+ * Spectral on a warm paper of its own, and these are pitwall.georgeputney.com's instead -
+ * Archivo, IBM Plex Mono, and its exact ground/surface/ink/body/muted values - so the two
+ * sites read as one family. Copper stays as Talos's own accent; pitwall's rust (#a8412a) is
+ * a hair away from it, which is why they already sit together.
+ *
+ * Piece colour carries two things at once: hue is ownership (yours vs Talos's), value is chess
+ * colour. Glyphs are the solid Unicode set for both sides - the outlined set reads as
+ * translucent at this size.
+ */
+
+:root {
+  --page: #f1efe8;        /* pitwall's app surface */
+  --page-edge: #e9e6df;   /* pitwall's body colour: the ground showing at the sides */
+  --ink: #16150f;
+  --body: #57534b;
+  --muted: #8d887c;
+  --rule: rgba(22, 21, 15, .14);
+  --rule-light: rgba(22, 21, 15, .07);
+  --track: rgba(22, 21, 15, .06);
+  --copper: #a3592c;
+  --copper-hover: #87461f;
+  --live: #6f8a58;
+
+  /* The nav takes the surface colour, with only the hairline under it marking it off. Two
+     tints were tried: the board's light square merged with the ground at the sides, and
+     pitwall's band tone read as a heavy stripe. Pitwall's own nav is the surface too - the
+     darker band in its layout is the squad row underneath, not the bar. */
+  --nav: #f1efe8;
+
+  --sq-light: #e7e5dc;
+  --sq-dark: #bdb9ad;
+  --sq-last-light: #e8d3c2;
+  --sq-last-dark: #cfb49e;
+  --sq-selected: #e0bfa5;
+
+  /* A move row and the box that holds them are derived from the same three numbers, so the
+     list is always a whole number of rows and can never come out at eight and a bit. */
+  --move-line: 13.5px;
+  --move-pad: 7px;
+  --move-row: calc(var(--move-line) + var(--move-pad) * 2 + 1px);
+  --move-rows: 9;
+
+  --gutter: 16px;          /* the single horizontal inset on a phone */
+  --evalbar-w: 10px;
+  --board-gap: 10px;       /* between the eval bar and the board */
+
+  --sans: Archivo, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--page-edge);
+  color: var(--ink);
+  font-family: var(--sans);
+  min-height: 100vh;
+}
+
+/* On a wide screen the app stops spreading and the darker ground shows at either side, the
+   way pitwall does it. Below the cap it fills the window and the bands simply are not there. */
+.app {
+  /* ~1180, measured off the pitwall screenshot: at a 1470px viewport that leaves about 150px
+     of ground each side. 1440 left 15px, which is the same treatment and no visible effect.
+     The board loses nothing, because it is capped by viewport height rather than by width. */
+  max-width: 1180px;
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--page);
+  border-left: 1px solid var(--rule);
+  border-right: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+}
+
+a { color: var(--copper); text-decoration: none; border-bottom: 1px solid rgba(163, 89, 44, .3); }
+a:hover { color: var(--copper-hover); border-bottom-color: var(--copper-hover); }
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(22, 21, 15, .18); }
+
+/* ---- nav --------------------------------------------------------------------------- */
+
+/* Sized and set to match pitwall's bar: 22px/44px padding, Archivo 600 14px for the wordmark,
+   Archivo 400 13px for the links, centred, no underlines. Tinted with the board's light square
+   so the bar reads as part of the same object rather than floating on the surface. */
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 22px 44px;
+  background: var(--nav);
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark { font: 600 14px/1 var(--sans); letter-spacing: -.01em; }
+.nav-links { display: flex; align-items: center; gap: 26px; font: 400 13px/1 var(--sans); }
+.nav-links a { color: var(--muted); border-bottom: none; }
+.nav-links a:hover { color: var(--ink); }
+
+/* ---- layout ------------------------------------------------------------------------ */
+
+/* min-height: 0 all the way down. A scrolling descendant is only bounded if every flex and
+   grid ancestor is allowed to shrink below its content - without it the move list grew the
+   panel, the panel grew the row, and the controls went off the bottom of the screen. */
+.grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /* The handoff caps this column at 340px, which wraps the intro to about 40 characters a
+     line - under a comfortable measure. 420 puts it near 55. It costs the board nothing on
+     most screens, because the board is limited by viewport height rather than by width. */
+  grid-template-columns: minmax(300px, 1fr) minmax(260px, 420px);
+}
+
+.board-col {
+  padding: 30px 26px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+}
+.board-stack { width: 100%; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
+.board-row { display: flex; gap: var(--board-gap); align-items: stretch; }
+
+/* The board is square, so its width is also its height. Size it to whatever the viewport has
+   left once the nav, the column padding and the two nameplates have taken theirs - measured at
+   192px, so 180 here plus the eval bar's 20 leaves a few pixels of breathing room rather than
+   a band of dead space under the board. The ceiling only stops it becoming absurd on a very
+   tall screen; the design's 620 assumed a width constraint that is not the binding one here. */
+@media (min-width: 701px) {
+  .board-stack { max-width: min(820px, calc(100vh - 180px)); }
+  /* an exact height, not a minimum: the app fills the window and the move list scrolls
+     inside it rather than the page growing a scrollbar of its own */
+  .app { height: 100vh; }
+}
+
+/* ---- nameplates -------------------------------------------------------------------- */
+
+/* indented past the eval bar, so the name and the clock line up with the board's edges
+   rather than with the bar beside it */
+.plate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-left: calc(var(--evalbar-w) + var(--board-gap));
+}
+.plate-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(22, 21, 15, .2); flex: none; }
+.dot.live { background: var(--live); }
+.pname {
+  font: 600 14.5px/1 var(--sans);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.prating { font: 400 12px/1 var(--mono); color: var(--muted); }
+.clock {
+  font: 500 19px/1 var(--mono);
+  color: var(--muted);
+  padding: 6px 11px;
+}
+.clock.running { color: var(--ink); background: rgba(22, 21, 15, .07); }
+
+/* ---- board ------------------------------------------------------------------------- */
+
+/* your share of the position against Talos's, in the same two colours the pieces use */
+.evalbar {
+  flex: none;
+  width: var(--evalbar-w);
+  display: flex;
+  align-items: flex-end;
+  background: #c47440;
+  border: 1px solid rgba(22, 21, 15, .2);
+}
+.evalbar-fill { width: 100%; height: 50%; background: #f3efe4; transition: height .4s ease; }
+
+.board-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+
+/* how a game ends belongs on the board, not folded into the status line */
+.verdict {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(231, 229, 220, .72);
+}
+.verdict[hidden] { display: none; }
+.verdict-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 80%;
+  padding: 24px 28px;
+  background: var(--page);
+  border: 1px solid rgba(22, 21, 15, .2);
+}
+.verdict-line {
+  font: 500 21px/1.3 var(--sans);
+  letter-spacing: -.015em;
+  text-align: center;
+  text-wrap: balance;
+}
+.verdict-btn {
+  font: 500 13px/1 var(--sans);
+  letter-spacing: .01em;
+  padding: 11px 22px;
+  background: var(--copper);
+  color: #fbf6ef;
+  border: none;
+  cursor: pointer;
+  transition: background .15s;
+}
+.verdict-btn:hover { background: var(--copper-hover); }
+
+.board {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+  aspect-ratio: 1;
+  container-type: size;
+  border: 1px solid rgba(22, 21, 15, .2);
+}
+
+/* min-width/min-height 0 and overflow hidden are load-bearing: without them the glyph's
+   min-content height breaks the square aspect ratio */
+.cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  font-size: 10.4cqw;
+  line-height: 1;
+}
+
+.cell.light { background: var(--sq-light); }
+.cell.dark { background: var(--sq-dark); }
+.cell.light.last { background: var(--sq-last-light); }
+.cell.dark.last { background: var(--sq-last-dark); }
+.cell.selected { background: var(--sq-selected); }
+
+.target-dot {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.target-dot span { width: 19%; height: 19%; border-radius: 50%; background: rgba(22, 21, 15, .28); }
+.capture-ring { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 3px rgba(163, 89, 44, .7); }
+
+/* text-shadow: none is the important one. These spans live inside the cell, so without it they
+   inherit the piece shadow - and on the ranks holding your pieces that is a dark halo, which
+   made those coordinates render black and heavy while the empty ranks stayed grey. Weight 400
+   rather than the handoff's 500: none of them should read as bold. */
+.coord-file, .coord-rank {
+  position: absolute;
+  font: 400 10px/1 var(--mono);
+  color: rgba(22, 21, 15, .35);
+  text-shadow: none;
+  pointer-events: none;
+}
+.coord-file { right: 3px; bottom: 1px; }
+.coord-rank { left: 3px; top: 2px; }
+
+/* hue is ownership, value is chess colour */
+.cell.you-w { color: #f3efe4; text-shadow: 0 0 1px #26231c, 0 0 2px rgba(38, 35, 28, .85); }
+.cell.you-b { color: #26231c; text-shadow: 0 1px 0 rgba(255, 255, 255, .25); }
+.cell.ai-w { color: #c47440; text-shadow: 0 1px 0 rgba(255, 255, 255, .25); }
+.cell.ai-b { color: #7d3a17; text-shadow: 0 1px 0 rgba(255, 255, 255, .25); }
+
+/* ---- panel ------------------------------------------------------------------------- */
+
+.panel {
+  border-left: 1px solid var(--rule);
+  padding: 30px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.intro { display: flex; flex-direction: column; gap: 12px; }
+h1 { font: 600 30px/1.15 var(--sans); letter-spacing: -.025em; text-wrap: balance; }
+.lede { font: 400 14.5px/1.6 var(--sans); color: var(--body); text-wrap: pretty; }
+
+.status-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-top: 1px solid var(--rule);
+  padding-top: 20px;
+}
+.status-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.status { font: 500 17px/1.35 var(--sans); text-wrap: pretty; }
+
+.actions { display: flex; gap: 16px; align-items: baseline; }
+.text-btn {
+  font: 400 13px/1 var(--sans);
+  padding: 3px 0;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(22, 21, 15, .25);
+  color: var(--ink);
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.text-btn.secondary { color: var(--muted); }
+.text-btn:hover:not(:disabled) { color: var(--copper); border-bottom-color: var(--copper); }
+.text-btn:disabled { opacity: .35; cursor: default; }
+
+/* sound is a preference rather than a move, so it reads as an icon among the two text
+   actions instead of a third verb competing with them */
+.icon-btn {
+  align-self: center;
+  display: inline-flex;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .15s;
+}
+.icon-btn:hover { color: var(--copper); }
+.icon-btn svg { display: block; }
+.icon-btn .ic-off { display: none; }
+.icon-btn.muted .ic-on { display: none; }
+.icon-btn.muted .ic-off { display: inline-flex; }
+
+/* ---- move list --------------------------------------------------------------------- */
+
+/* a fixed region that scrolls, not one that grows: the panel looks the same on move 2 and
+   move 60, and a long game scrolls inside it */
+.moves { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
+.moves-head, .move-row { display: grid; grid-template-columns: 26px 1fr 1fr; gap: 0 10px; }
+.moves-head {
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(22, 21, 15, .16);
+  font: 400 10px/1 var(--mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.moves-body {
+  flex: 0 1 auto;
+  height: calc(var(--move-row) * var(--move-rows));
+  min-height: 0;
+  overflow-y: auto;
+}
+.move-row {
+  padding: var(--move-pad) 0;
+  border-bottom: 1px solid var(--rule-light);
+  font: 400 var(--move-line)/1 var(--mono);
+  color: var(--ink);
+}
+.move-row .n { color: var(--muted); }
+.move-row .b { color: var(--body); }
+.moves-empty { padding: 14px 0; font: 400 14px/1.5 var(--sans); color: var(--muted); }
+
+/* ---- foot -------------------------------------------------------------------------- */
+
+.foot {
+  margin-top: auto;   /* the panel's slack sits above the controls, not inside the move list */
+  display: flex; flex-direction: column; gap: 12px;
+  border-top: 1px solid var(--rule);
+  padding-top: 20px;
+}
+/* The two controls sit side by side and share the row. Stacking them right-aligned left an
+   L-shaped hole under the label, which is what made the button look mis-sized at every width
+   it was tried at - the gap was the problem, not the button. */
+.foot-label {
+  font: 400 11px/1 var(--mono);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.foot-row { display: flex; align-items: stretch; gap: 10px; }
+
+.segmented { flex: 1; display: flex; background: var(--track); padding: 2px; }
+.seg {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 12px;
+  font: 400 13px/1 var(--sans);
+  cursor: pointer;
+  background: none;
+  border: none;
+  color: var(--muted);
+  transition: background .15s;
+}
+/* the selected box shows the colour you would be playing, in the board's own piece colours -
+   the handoff has both selected states on #fbf8f1, which says nothing about the choice */
+.seg.on { background: #f3efe4; color: #26231c; }
+#seg-black.on { background: #26231c; color: #f3efe4; }
+
+.new-game {
+  flex: 1;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  font: 600 13px/1 var(--sans);
+  letter-spacing: .01em;
+  padding: 14px 16px;
+  background: var(--copper);
+  color: #fbf6ef;
+  border: none;
+  cursor: pointer;
+  transition: background .15s;
+}
+.new-game:hover { background: var(--copper-hover); }
+.new-game .tc { font: 400 12px/1 var(--mono); opacity: .75; }
+
+.error { font: 400 12.5px/1.4 var(--mono); color: #8c3a2a; }
+/* takes no height until there is something to report, or it pads the foot out below the button */
+.error:empty { display: none; }
+
+:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
+
+/* The handoff notes this breakpoint is not in the prototype and needs designing: one column,
+   board first, panel below. */
+@media (max-width: 700px) {
+  /* align-content: start, because grid's default behaves as stretch and grows auto-sized rows
+     to fill the container - which inflated the panel and left a gap above the board. */
+  .grid { grid-template-columns: 1fr; align-content: start; }
+
+  /* display: contents dissolves the panel so its children become grid items in their own
+     right. That is what lets the pitch sit above the board while the status and the controls
+     sit below it - two grid items could only ever put the whole panel on one side. The panel
+     carries the padding and rules on desktop, so each child takes its own here. */
+  .panel { display: contents; }
+
+  .intro       { order: 1; padding: 20px var(--gutter) 0; }
+  .board-col   { order: 2; padding: 18px var(--gutter); }
+  .status-block { order: 3; padding: 0 var(--gutter) 18px; border-top: none; }
+  .foot {
+    order: 4;
+    margin-top: 0;
+    padding: 18px var(--gutter) 24px;
+    border-top: 1px solid var(--rule);
+  }
+
+  /* one gutter throughout: the desktop values differ per section, which is fine side by side
+     and reads as three different margins once they are stacked */
+  .nav { padding: 16px var(--gutter); }
+
+  .foot-row { flex-direction: column; }
+
+  /* no eval bar on a phone. It is 20px of a 390px screen taken off the board, which is the
+     thing people came for, and the evaluation is secondary to playing. With it gone the
+     nameplates need no indent either. */
+  .evalbar { display: none; }
+  .plate { margin-left: 0; }
+
+  /* no notation on a phone: nine rows of algebraic is a lot of screen for something nobody
+     reads mid-game on a handset, and it pushed the controls further down */
+  .moves { display: none; }
+}
+

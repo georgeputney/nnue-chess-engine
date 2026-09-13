@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talos - play the engine</title>
+<meta name="description" content="Play Talos, an NNUE chess engine written from scratch: alpha-beta search over numba-JIT magic bitboards, evaluated by a network trained on 215M positions.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#a3592c">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+<nav class="nav">
+  <span class="wordmark">Talos</span>
+  <span class="nav-links">
+    <a href="https://georgeputney.com/projects/nnue-chess-engine/" target="_blank" rel="noopener">write-up &#8599;</a>
+    <a href="https://github.com/georgeputney/nnue-chess-engine" target="_blank" rel="noopener">code &#8599;</a>
+    <a href="https://lichess.org/@/TalosBot" target="_blank" rel="noopener">lichess &#8599;</a>
+  </span>
+</nav>
+
+<div class="grid">
+  <main class="board-col">
+    <div class="board-stack">
+
+      <div class="plate">
+        <span class="plate-id">
+          <span class="dot" id="top-dot"></span>
+          <span class="pname" id="top-name">TalosBot</span>
+          <span class="prating" id="top-rating">2314</span>
+        </span>
+        <span class="clock" id="top-clock">2:00</span>
+      </div>
+
+      <div class="board-row">
+        <div class="evalbar" id="evalbar" title="Static evaluation">
+          <div class="evalbar-fill" id="evalbar-fill"></div>
+        </div>
+        <div class="board-wrap">
+          <div class="board" id="board"></div>
+          <div class="verdict" id="verdict" hidden>
+            <div class="verdict-card">
+              <p class="verdict-line" id="verdict-line"></p>
+              <button class="verdict-btn" id="verdict-new">New game</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="plate">
+        <span class="plate-id">
+          <span class="dot" id="bot-dot"></span>
+          <span class="pname" id="bot-name">You</span>
+          <span class="prating" id="bot-rating">&#8212;</span>
+        </span>
+        <span class="clock" id="bot-clock">2:00</span>
+      </div>
+
+    </div>
+  </main>
+
+  <aside class="panel">
+
+    <div class="intro">
+      <h1>Take it on.</h1>
+      <p class="lede">Built from scratch in 10 days for the Optiver-sponsored AI Chessathon.</p>
+      <p class="lede">Features: alpha-beta search over numba-JIT magic bitboards, transposition
+        tables, and late move reductions, with an NNUE evaluator trained on 215M positions.</p>
+    </div>
+
+    <div class="status-block">
+      <div class="status-row">
+        <p class="status" id="status">Your move.</p>
+        <div class="actions">
+          <button class="icon-btn" id="mute" type="button" aria-label="Mute" title="Mute">
+            <span class="ic ic-on"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.2 6.1h2.4L7.4 3.5v9L4.6 9.9H2.2z" fill="currentColor"/><path d="M9.7 6.2a2.5 2.5 0 0 1 0 3.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M11.5 4.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+            <span class="ic ic-off"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2.2 6.1h2.4L7.4 3.5v9L4.6 9.9H2.2z" fill="currentColor"/><path d="M10.1 6.3l3.5 3.4M13.6 6.3l-3.5 3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+          </button>
+          <button class="text-btn" id="undo">Undo</button>
+          <button class="text-btn secondary" id="resign">Resign</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="moves">
+      <div class="moves-head"><span>#</span><span>White</span><span>Black</span></div>
+      <div class="moves-body" id="moves"></div>
+    </div>
+
+    <div class="foot">
+      <span class="foot-label">Play as</span>
+      <div class="foot-row">
+        <div class="segmented">
+          <button class="seg on" id="seg-white">White</button>
+          <button class="seg" id="seg-black">Black</button>
+        </div>
+        <button class="new-game" id="new-game">
+          <span>New game</span><span class="tc">2+1</span>
+        </button>
+      </div>
+      <p class="error" id="error"></p>
+    </div>
+
+  </aside>
+</div>
+
+</div>
+
+<script src="sounds.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

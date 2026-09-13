@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: setup bundle play arena zip gate bench verify
+.PHONY: setup bundle play arena zip gate bench verify web space
 
 setup:
 	uv sync
@@ -38,3 +38,18 @@ verify:
 	uv run python bench/verify_zobrist.py
 	uv run python bench/verify_see.py
 	uv run python bench/verify_nnue.py
+
+# the browser demo: one warm engine process behind a small HTTP server. PORT=8080 to move it.
+web:
+	uv run python web/server.py $(PORT)
+
+# assemble the Hugging Face Space: Hugging Face looks for Dockerfile and README.md at the repo
+# root, so this builds a minimal tree with them there. Idempotent, and it leaves any .git in
+# candidates/space alone - the second deploy is just commit and push.
+space:
+	@mkdir -p candidates/space
+	@rm -rf candidates/space/engine candidates/space/web
+	@rsync -a --exclude '__pycache__' engine web candidates/space/
+	@cp web/Dockerfile candidates/space/Dockerfile
+	@cp web/space/README.md candidates/space/README.md
+	@echo "assembled candidates/space ($$(du -sh candidates/space | cut -f1)) - push steps in web/README.md"

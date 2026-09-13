@@ -1,0 +1,16 @@
+# the numba cache is gigabytes and architecture-specific - the image builds its own
+**/__pycache__
+.venv
+.mypy_cache
+.ruff_cache
+.git
+# training corpora, historical snapshots, and the competition record: none of it runs the demo
+data
+games
+snapshots
+stages
+bench
+tools
+harness
+*.zip
+*.pgn
